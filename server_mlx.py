@@ -340,11 +340,20 @@ async def handle_client(websocket):
     async def run_inference_task(segment: np.ndarray, chunk_id: int, time_offset: float, overlap_after: float):
         try:
             cid, sentences = await loop.run_in_executor(None, transcribe, segment, chunk_id, time_offset)
-            cutoff = time_offset + overlap_after
             if overlap_after > 0:
+                # 保留 [time_offset, time_offset+overlap_after) 区间内的句子
+                # 超出 overlap_after 的部分属于本块的尾部重叠上下文，将由下一块负责，避免重复
+                cutoff = time_offset + overlap_after
                 before    = len(sentences)
-                sentences = [s for s in sentences if s["start"] >= cutoff - 0.1]
-                log.info(f"[任务] 重叠过滤: cutoff={cutoff:.2f}s, {before}→{len(sentences)} 句")
+                sentences = [s for s in sentences
+                             if (time_offset - 0.1) <= s["start"] < (cutoff + 0.1)]
+                log.info(f"[任务] 重叠过滤: [{time_offset:.2f}s, {cutoff:.2f}s), {before}→{len(sentences)} 句")
+            else:
+                # 末块或无重叠块：仅过滤掉时间戳异常漂移到本块之前的句子
+                before = len(sentences)
+                sentences = [s for s in sentences if s["start"] >= time_offset - 0.1]
+                if before != len(sentences):
+                    log.info(f"[任务] 末块时间戳修正: {before}→{len(sentences)} 句")
             await send_result(cid, sentences)
         except Exception as e:
             log.error(f"[任务] chunk_id={chunk_id} 异常: {e}", exc_info=True)

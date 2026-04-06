@@ -12,6 +12,7 @@ const ERR = (...a) => console.error('[BiliSub Offscreen]', ...a);
 
 const WS_URL     = 'ws://localhost:8765';
 const TARGET_SR  = 16000;
+const TARGET_CHUNK_SECS = 55;   // 每块目标时长（含重叠后 ≤56.5s，留有余量不超过服务端上限）
 
 let ws            = null;
 let pendingChunks = [];   // {pcm: Float32Array, timeOffset: number, chunkId: number}
@@ -152,9 +153,9 @@ function enqueueChunks(samples, duration, n) {
     const end        = Math.min(i === n - 1 ? samples.length : (i + 1) * chunkLen + overlapSamp, samples.length);
     const pcm        = samples.slice(start, end);
     const timeOffset = (start / samples.length) * duration;
-    // 告诉服务端：只输出 start >= overlapAfter 的句子（即非重叠部分）
-    // 第一块没有前置重叠，其余块的真实内容从 chunkLen 处开始
-    const overlapAfter = i === 0 ? 0 : (chunkLen / samples.length) * duration;
+    // 告诉服务端每块的有效时长边界（超出部分为尾部重叠上下文，由下一块负责）
+    // 末块没有尾部重叠，overlapAfter=0 表示不截断；其余块均需过滤尾部重叠区
+    const overlapAfter = (i === n - 1) ? 0 : (chunkLen / samples.length) * duration;
 
     LOG(`[Chunk] 入队 chunk ${i}: samples=${pcm.length}(${(pcm.length/TARGET_SR).toFixed(1)}s), timeOffset=${timeOffset.toFixed(2)}s, overlapAfter=${overlapAfter.toFixed(2)}s`);
     pendingChunks.push({ pcm, timeOffset, chunkId: i, overlapAfter });
@@ -241,6 +242,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       const buf = await fetchAudio(msg.audioUrl);
       const { samples, duration } = await decodeAndResample(buf);
+
+      // 根据实际音频时长动态调整块数，确保每块（含尾部重叠）不超过服务端截断上限
+      if (currentModel !== 'vibevoice') {
+        const minChunks = Math.ceil(duration / TARGET_CHUNK_SECS);
+        if (minChunks > totalChunks) {
+          LOG(`[Chunk] 动态扩容: ${totalChunks} → ${minChunks} 块（时长 ${duration.toFixed(1)}s，目标每块≤${TARGET_CHUNK_SECS}s）`);
+          totalChunks = minChunks;
+          // 通知 background 更新进度分母
+          chrome.runtime.sendMessage({ type: 'CHUNKS_TOTAL', total: totalChunks });
+        }
+      }
+
       enqueueChunks(samples, duration, totalChunks);
       drainQueue();
 

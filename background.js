@@ -15,6 +15,7 @@ let state = {
   activeTabId: null,
   allWords:    [],          // 所有 chunk 的词，按 start 排序
   chunksReceived: 0,
+  totalChunks: TOTAL_CHUNKS,
 };
 
 // ════════════════════════════════════════════════════════
@@ -86,7 +87,7 @@ async function ensureOffscreen() {
 
 async function startProcessing(bvid, tabId, model = 'qwen3') {
   LOG(`==== startProcessing: bvid=${bvid} tabId=${tabId} ====`);
-  state = { activeTabId: tabId, allWords: [], chunksReceived: 0 };
+  state = { activeTabId: tabId, allWords: [], chunksReceived: 0, totalChunks: TOTAL_CHUNKS };
 
   const notifyTab     = (msg) => chrome.tabs.sendMessage(tabId, msg).catch(e => LOG('tabs.msg err:', e.message));
   const notifyPopup   = (msg) => chrome.runtime.sendMessage({ _to: 'popup', ...msg }).catch(() => {});
@@ -146,7 +147,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     state.allWords.sort((a, b) => a.start - b.start);
     state.chunksReceived++;
 
-    const progress = Math.round((state.chunksReceived / TOTAL_CHUNKS) * 100);
+    const progress = Math.round((state.chunksReceived / state.totalChunks) * 100);
 
     if (state.activeTabId) {
       chrome.tabs.sendMessage(state.activeTabId, {
@@ -164,6 +165,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       wordsCount: state.allWords.length,
     }).catch(() => {});
 
+    return true;
+  }
+
+  // ── offscreen → CHUNKS_TOTAL（动态扩容通知）─────────
+  if (msg.type === 'CHUNKS_TOTAL') {
+    LOG(`[CHUNKS_TOTAL] 总块数更新: ${state.totalChunks} → ${msg.total}`);
+    state.totalChunks = msg.total;
     return true;
   }
 
