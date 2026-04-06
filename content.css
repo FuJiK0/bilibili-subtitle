@@ -1,0 +1,67 @@
+/* content.css — B站字幕覆盖层样式 */
+
+#bilisub-container {
+  position: absolute;
+  bottom: 56px;           /* 避开 B站原生控制栏 */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9998;
+  text-align: center;
+  pointer-events: none;
+  max-width: 82%;
+
+  /* 默认隐藏，.visible 类触发显示 */
+  opacity: 0;
+  transition: opacity 0.15s ease-in-out;
+}
+
+#bilisub-container.visible {
+  opacity: 1;
+}
+
+#bilisub-text {
+  display: inline-block;
+  background: rgba(0, 0, 0, 0.72);   /* 与 JS 中 bgOpacity 保持一致 */
+  color: #ffffff;
+  font-size: 19px;                    /* 与 JS 中 fontSize 保持一致 */
+  font-family: "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  font-weight: 500;
+  padding: 5px 14px 7px;
+  border-radius: 3px;
+  line-height: 1.5;
+  letter-spacing: 0.025em;
+  word-break: break-all;
+  /* 防止字幕文字被 B站弹幕选中 */
+  user-select: none;
+}
+
+/* ── Toast 提示（视频右上角） ───────────────────────── */
+#bilisub-toast {
+  position: fixed;
+  top: 68px;
+  right: 18px;
+  z-index: 99999;
+  padding: 7px 14px;
+  border-radius: 6px;
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  pointer-events: none;
+  transition: opacity 0.4s ease;
+  max-width: 280px;
+  text-align: left;
+  line-height: 1.4;
+}
+
+.bilisub-toast-info {
+  background: rgba(0, 0, 0, 0.80);
+  color: #e8e8e8;
+}
+.bilisub-toast-error {
+  background: rgba(220, 38, 38, 0.90);
+  color: #fff;
+}
+.bilisub-toast-success {
+  background: rgba(22, 163, 74, 0.90);
+  color: #fff;
+}
