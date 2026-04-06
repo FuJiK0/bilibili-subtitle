@@ -17,6 +17,26 @@ const fontSizeVal = document.getElementById('font-size-val');
 const bgOpEl      = document.getElementById('bg-opacity');
 const bgOpVal     = document.getElementById('bg-opacity-val');
 
+// ── 模型选择 ─────────────────────────────────────────────
+let selectedModel = 'qwen3';
+
+document.querySelectorAll('.model-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.model-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    selectedModel = btn.dataset.model;
+    LOG(`模型切换: ${selectedModel}`);
+    const hint = document.getElementById('model-hint');
+    if (selectedModel === 'vibevoice') {
+      hint.textContent = 'VibeVoice 9B｜首次使用会自动下载（~17GB），请耐心等待';
+      hint.style.color = 'rgba(251,191,36,0.7)';
+    } else {
+      hint.textContent = 'Qwen3: 快速，需 Aligner｜VibeVoice: 9B，自带时间戳，首次需下载';
+      hint.style.color = 'rgba(255,255,255,0.3)';
+    }
+  });
+});
+
 // ── BV 提取 ──────────────────────────────────────────────
 function extractBvid(raw) {
   const s = raw.trim();
@@ -69,7 +89,7 @@ btnGen.addEventListener('click', async () => {
   setProgress(0, 0);
   setStatus('正在获取音频信息...');
 
-  chrome.runtime.sendMessage({ type: 'START', bvid, tabId: tab.id }, (resp) => {
+  chrome.runtime.sendMessage({ type: 'START', bvid, tabId: tab.id, model: selectedModel }, (resp) => {
     if (chrome.runtime.lastError) {
       setStatus(`发送失败: ${chrome.runtime.lastError.message}`, 'error');
       LOG('sendMessage error:', chrome.runtime.lastError.message);

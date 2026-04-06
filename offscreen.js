@@ -41,13 +41,13 @@ function connectWS() {
       try { data = JSON.parse(e.data); }
       catch (err) { ERR('[WS] JSON 解析失败:', err); processing = false; drainQueue(); return; }
 
-      const { chunk_id, words } = data;
-      LOG(`[WS] chunk_id=${chunk_id} | ${words?.length ?? 0} 词`);
+      const { chunk_id, sentences } = data;
+      LOG(`[WS] chunk_id=${chunk_id} | ${sentences?.length ?? 0} 句`);
 
       chrome.runtime.sendMessage({
         type: 'CHUNK_DONE',
         chunk_id,
-        words: words ?? [],
+        sentences: sentences ?? [],
       });
 
       // 通知 background 检查是否全部完成
@@ -77,6 +77,7 @@ function connectWS() {
 }
 
 let chunksReceived = 0;
+let currentModel   = 'qwen3';   // 跟随 popup 设置
 
 // ════════════════════════════════════════════════════════
 //  音频下载 & 解码
@@ -139,18 +140,24 @@ async function decodeAndResample(arrayBuffer) {
 //  分块 & 队列
 // ════════════════════════════════════════════════════════
 
+const OVERLAP_SECS = 1.5;   // 每块末尾额外送入后续音频作为上下文
+
 function enqueueChunks(samples, duration, n) {
-  const chunkLen = Math.floor(samples.length / n);
-  LOG(`[Chunk] 分为 ${n} 块，每块约 ${(chunkLen/TARGET_SR).toFixed(1)}s`);
+  const chunkLen    = Math.floor(samples.length / n);
+  const overlapSamp = Math.floor(OVERLAP_SECS * TARGET_SR);
+  LOG(`[Chunk] 分为 ${n} 块，每块约 ${(chunkLen/TARGET_SR).toFixed(1)}s，重叠 ${OVERLAP_SECS}s`);
 
   for (let i = 0; i < n; i++) {
-    const start     = i * chunkLen;
-    const end       = i === n - 1 ? samples.length : (i + 1) * chunkLen;
-    const pcm       = samples.slice(start, end);
+    const start      = i * chunkLen;
+    const end        = Math.min(i === n - 1 ? samples.length : (i + 1) * chunkLen + overlapSamp, samples.length);
+    const pcm        = samples.slice(start, end);
     const timeOffset = (start / samples.length) * duration;
+    // 告诉服务端：只输出 start >= overlapAfter 的句子（即非重叠部分）
+    // 第一块没有前置重叠，其余块的真实内容从 chunkLen 处开始
+    const overlapAfter = i === 0 ? 0 : (chunkLen / samples.length) * duration;
 
-    LOG(`[Chunk] 入队 chunk ${i}: samples=${pcm.length}, timeOffset=${timeOffset.toFixed(3)}s`);
-    pendingChunks.push({ pcm, timeOffset, chunkId: i });
+    LOG(`[Chunk] 入队 chunk ${i}: samples=${pcm.length}(${(pcm.length/TARGET_SR).toFixed(1)}s), timeOffset=${timeOffset.toFixed(2)}s, overlapAfter=${overlapAfter.toFixed(2)}s`);
+    pendingChunks.push({ pcm, timeOffset, chunkId: i, overlapAfter });
     chunksQueued++;
   }
 }
@@ -173,10 +180,10 @@ function drainQueue() {
   }
 
   processing = true;
-  const { pcm, timeOffset, chunkId } = pendingChunks.shift();
+  const { pcm, timeOffset, chunkId, overlapAfter } = pendingChunks.shift();
 
-  // 发送元数据帧（JSON 文本）
-  const meta = JSON.stringify({ type: 'chunk_meta', chunk_id: chunkId, time_offset: timeOffset });
+  // 发送元数据帧
+  const meta = JSON.stringify({ type: 'chunk_meta', chunk_id: chunkId, time_offset: timeOffset, overlap_after: overlapAfter });
   LOG(`[Queue] 发送元数据: ${meta}`);
   ws.send(meta);
 
@@ -191,30 +198,49 @@ function drainQueue() {
 // ════════════════════════════════════════════════════════
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  // 只处理发给 offscreen 的或无目标的消息
   if (msg._to && msg._to !== 'offscreen') return;
   if (msg.type !== 'PROCESS_AUDIO') return;
 
-  LOG(`[MSG] 收到 PROCESS_AUDIO: totalChunks=${msg.totalChunks}`);
-  totalChunks    = msg.totalChunks ?? 5;
+  currentModel = msg.model ?? 'qwen3';
+  // VibeVoice 支持 60 分钟单次推理，发 1 个 chunk；Qwen3 分 5 块
+  const n = currentModel === 'vibevoice' ? 1 : (msg.totalChunks ?? 5);
+
+  LOG(`[MSG] PROCESS_AUDIO model=${currentModel} chunks=${n}`);
+  totalChunks    = n;
   chunksReceived = 0;
   pendingChunks  = [];
   processing     = false;
   chunksQueued   = 0;
 
-  // 异步处理
   (async () => {
     try {
-      // 连接 WS（如已连接则跳过）
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         await connectWS();
       }
 
-      // 下载 & 解码
+      // 通知服务端切换模型，等待确认
+      const modelMsg = JSON.stringify({ type: 'set_model', model: currentModel });
+      LOG(`[MSG] 发送 set_model: ${modelMsg}`);
+      ws.send(modelMsg);
+
+      await new Promise((resolve, reject) => {
+        const tid = setTimeout(() => reject(new Error('模型切换超时（30s）')), 30000);
+        const handler = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            if (data.type === 'model_status') {
+              clearTimeout(tid);
+              ws.removeEventListener('message', handler);
+              if (data.error) { reject(new Error(data.error)); }
+              else { LOG(`[MSG] 模型确认: ${data.current_model} loading=${data.loading}`); resolve(); }
+            }
+          } catch {}
+        };
+        ws.addEventListener('message', handler);
+      });
+
       const buf = await fetchAudio(msg.audioUrl);
       const { samples, duration } = await decodeAndResample(buf);
-
-      // 分块入队并开始处理
       enqueueChunks(samples, duration, totalChunks);
       drainQueue();
 

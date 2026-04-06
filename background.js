@@ -84,7 +84,7 @@ async function ensureOffscreen() {
 //  主流程
 // ════════════════════════════════════════════════════════
 
-async function startProcessing(bvid, tabId) {
+async function startProcessing(bvid, tabId, model = 'qwen3') {
   LOG(`==== startProcessing: bvid=${bvid} tabId=${tabId} ====`);
   state = { activeTabId: tabId, allWords: [], chunksReceived: 0 };
 
@@ -109,6 +109,7 @@ async function startProcessing(bvid, tabId) {
       _to:         'offscreen',
       type:        'PROCESS_AUDIO',
       audioUrl,
+      model:       model,
       totalChunks: TOTAL_CHUNKS,
     });
 
@@ -131,35 +132,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // ── popup → START ──────────────────────────────────
   if (msg.type === 'START') {
-    startProcessing(msg.bvid, msg.tabId);
+    startProcessing(msg.bvid, msg.tabId, msg.model ?? 'qwen3');
     sendResponse({ ok: true });
     return true;
   }
 
   // ── offscreen → CHUNK_DONE ─────────────────────────
   if (msg.type === 'CHUNK_DONE') {
-    const { chunk_id, words } = msg;
-    LOG(`[CHUNK_DONE] chunk_id=${chunk_id} | ${words.length} 词`);
+    const { chunk_id, sentences } = msg;
+    LOG(`[CHUNK_DONE] chunk_id=${chunk_id} | ${sentences.length} 句`);
 
-    // 合并并按时间排序
-    state.allWords.push(...words);
+    state.allWords.push(...sentences);
     state.allWords.sort((a, b) => a.start - b.start);
     state.chunksReceived++;
 
     const progress = Math.round((state.chunksReceived / TOTAL_CHUNKS) * 100);
-    LOG(`[CHUNK_DONE] 进度 ${state.chunksReceived}/${TOTAL_CHUNKS} = ${progress}%，总词数: ${state.allWords.length}`);
 
-    // 立即推送到 content.js（渐进显示）
     if (state.activeTabId) {
       chrome.tabs.sendMessage(state.activeTabId, {
-        type:     'WORDS_UPDATE',
-        words:    state.allWords,
+        type:      'WORDS_UPDATE',
+        sentences: state.allWords,
         chunk_id,
         progress,
       }).catch(e => LOG('content msg err:', e.message));
     }
 
-    // 更新 popup 进度
     chrome.runtime.sendMessage({
       _to:        'popup',
       type:       'PROGRESS',
@@ -176,8 +173,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (state.activeTabId) {
       chrome.tabs.sendMessage(state.activeTabId, {
-        type:  'ALL_DONE',
-        words: state.allWords,
+        type:      'ALL_DONE',
+        sentences: state.allWords,
       }).catch(e => LOG('content msg err:', e.message));
     }
 

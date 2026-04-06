@@ -154,6 +154,7 @@
 
     input[type="range"] {
       -webkit-appearance: none;
+      appearance: none;
       width: 100px; height: 3px;
       border-radius: 2px;
       background: rgba(255,255,255,0.15);
@@ -161,10 +162,14 @@
     }
     input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none;
+      appearance: none;
       width: 13px; height: 13px; border-radius: 50%;
       background: #00AEEC; cursor: pointer;
     }
     .setting-value { font-size: 12px; color: #00AEEC; min-width: 32px; text-align: right; }
+  .model-tab:hover { border-color:rgba(0,174,236,0.4)!important; color:#00AEEC!important; }
+    .model-tab.active { background:rgba(0,174,236,0.2)!important; color:#00AEEC!important;
+                        border-color:rgba(0,174,236,0.5)!important; }
   </style>
 </head>
 <body>
@@ -190,7 +195,27 @@
     <input type="text" id="url-input"
            placeholder="粘贴 B站视频链接或 BV 号">
     <button id="btn-generate" disabled>生成字幕</button>
+  
+  <!-- 模型选择 -->
+  <div style="display:flex;align-items:center;gap:8px;margin-top:10px;">
+    <span style="font-size:12px;color:rgba(255,255,255,0.5);flex-shrink:0;">ASR 模型</span>
+    <div id="model-tabs" style="display:flex;gap:4px;flex:1;">
+      <button class="model-tab active" data-model="qwen3"
+        style="flex:1;padding:5px 0;border:1px solid rgba(255,255,255,0.15);border-radius:6px;
+               background:rgba(0,174,236,0.2);color:#00AEEC;font-size:11px;font-weight:600;cursor:pointer;">
+        Qwen3-ASR
+      </button>
+      <button class="model-tab" data-model="vibevoice"
+        style="flex:1;padding:5px 0;border:1px solid rgba(255,255,255,0.1);border-radius:6px;
+               background:transparent;color:rgba(255,255,255,0.45);font-size:11px;cursor:pointer;">
+        VibeVoice
+      </button>
+    </div>
   </div>
+  <p id="model-hint" style="font-size:10px;color:rgba(255,255,255,0.3);margin-top:5px;text-align:center;">
+    Qwen3: 快速，需 Aligner｜VibeVoice: 9B，自带时间戳，首次需下载
+  </p>
+</div>
 </div>
 
 <!-- 进度 -->
