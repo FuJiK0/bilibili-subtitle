@@ -377,13 +377,19 @@ function startLoop() {
           textEl.textContent = active.text;
           lastCueText = active.text;
           container.classList.add('visible');
-          LOG(`[Loop] 显示 [${active.start.toFixed(2)}-${active.end.toFixed(2)}s]: 「${active.text}」 @ t=${t.toFixed(2)}s`);
+          const idx = cues.indexOf(active);
+          const prev = cues[idx - 1];
+          const next = cues[idx + 1];
+          LOG(`[Cue►] t=${t.toFixed(2)}s | [${active.start.toFixed(2)}-${active.end.toFixed(2)}s] 「${active.text}」`
+            + (prev ? ` | 前句间隔=${(active.start - prev.end).toFixed(2)}s` : '')
+            + (next ? ` | 后句间隔=${(next.start - active.end).toFixed(2)}s` : ''));
           highlightListItem(active);
         }
       } else if (lastCueText !== '') {
         container.classList.remove('visible');
+        LOG(`[Cue◄] 隐藏 @ t=${t.toFixed(2)}s | 最近结束句结束于 `
+          + `${[...cues].reverse().find(c => c.end <= t)?.end?.toFixed(2) ?? '?'}s`);
         lastCueText = '';
-        LOG(`[Loop] 隐藏 @ t=${t.toFixed(2)}s`);
         if (listContainer) {
           const currentActive = listContainer.querySelector('.bilisub-list-item.active');
           if (currentActive) currentActive.classList.remove('active');
