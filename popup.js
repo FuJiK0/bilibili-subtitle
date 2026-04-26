@@ -1,5 +1,9 @@
 // popup.js
 const LOG = (...a) => console.log('[BiliSub Popup]', ...a);
+const OFFSCREEN_DOCUMENT_URL = 'offscreen.html';
+// 与 background.js 保持一致，避免 popup 探活时重新用会超时回收的 AUDIO_PLAYBACK 创建文档。
+const OFFSCREEN_REASONS = ['WORKERS'];
+const OFFSCREEN_JUSTIFICATION = 'Keep an offscreen document alive for ASR websocket probing';
 
 // ── DOM refs ──────────────────────────────────────────────
 const wsDot      = document.getElementById('ws-dot');
@@ -170,9 +174,9 @@ async function init() {
   // 确保 offscreen 存在后发送 CHECK_WS
   try {
     await chrome.offscreen.createDocument({
-      url: 'offscreen.html',
-      reasons: ['AUDIO_PLAYBACK'],
-      justification: 'WS probe',
+      url: OFFSCREEN_DOCUMENT_URL,
+      reasons: OFFSCREEN_REASONS,
+      justification: OFFSCREEN_JUSTIFICATION,
     }).catch(() => {}); // 可能已存在，忽略错误
 
     chrome.runtime.sendMessage({ _to: 'offscreen', type: 'CHECK_WS' });

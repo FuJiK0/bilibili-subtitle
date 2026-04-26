@@ -13,12 +13,26 @@ const ERR = (...a) => console.error('[BiliSub Offscreen]', ...a);
 const WS_URL     = 'ws://localhost:8765';
 const TARGET_SR  = 16000;
 const TARGET_CHUNK_SECS = 55;   // 每块目标时长（含重叠后 ≤56.5s，留有余量不超过服务端上限）
+const MODEL_SWITCH_TIMEOUT_MS = 30000;
 
 let ws            = null;
 let pendingChunks = [];   // {pcm: Float32Array, timeOffset: number, chunkId: number}
 let processing    = false;
 let totalChunks   = 5;
 let chunksQueued  = 0;    // 已送入 pendingChunks 的数量
+let chunksReceived = 0;
+let completedChunkIds = new Set();
+let currentSessionId = 0; // 用于忽略旧任务残留的异步回调
+let allDoneSent = false;
+let modelSwitchWaiter = null;
+
+// 记录 offscreen 生命周期，便于定位浏览器为何主动关闭文档。
+window.addEventListener('pagehide', () => {
+  LOG('[Lifecycle] offscreen pagehide');
+});
+window.addEventListener('beforeunload', () => {
+  LOG('[Lifecycle] offscreen beforeunload');
+});
 
 // ════════════════════════════════════════════════════════
 //  WebSocket
@@ -42,6 +56,16 @@ function connectWS() {
       try { data = JSON.parse(e.data); }
       catch (err) { ERR('[WS] JSON 解析失败:', err); processing = false; drainQueue(); return; }
 
+      if (data.type === 'model_status') {
+        handleModelStatus(data);
+        return;
+      }
+
+      if (!isChunkResultMessage(data)) {
+        LOG('[WS] 忽略未知消息:', data);
+        return;
+      }
+
       const { chunk_id, sentences } = data;
       LOG(`[WS] chunk_id=${chunk_id} | ${sentences?.length ?? 0} 句`);
 
@@ -51,13 +75,7 @@ function connectWS() {
         sentences: sentences ?? [],
       });
 
-      // 通知 background 检查是否全部完成
-      chunksReceived++;
-      LOG(`[WS] 进度: ${chunksReceived}/${totalChunks}`);
-      if (chunksReceived >= totalChunks) {
-        LOG('[WS] 所有块处理完毕，发送 ALL_DONE');
-        chrome.runtime.sendMessage({ type: 'ALL_DONE' });
-      }
+      markChunkCompleted(chunk_id);
 
       processing = false;
       drainQueue();
@@ -73,12 +91,75 @@ function connectWS() {
     ws.onclose = () => {
       LOG('[WS] 连接已关闭');
       chrome.runtime.sendMessage({ type: 'WS_STATUS', connected: false });
+      if (!allDoneSent && (processing || pendingChunks.length > 0 || chunksReceived > 0)) {
+        chrome.runtime.sendMessage({
+          type: 'ERROR',
+          message: `WebSocket 连接中断，转写已停止（${chunksReceived}/${totalChunks} 块完成）`,
+        });
+      }
     };
   });
 }
 
-let chunksReceived = 0;
 let currentModel   = 'qwen3';   // 跟随 popup 设置
+
+function resetProcessingState(total) {
+  if (modelSwitchWaiter) {
+    clearTimeout(modelSwitchWaiter.timerId);
+    modelSwitchWaiter = null;
+  }
+  totalChunks = total;
+  chunksReceived = 0;
+  pendingChunks = [];
+  processing = false;
+  chunksQueued = 0;
+  completedChunkIds = new Set();
+  allDoneSent = false;
+}
+
+function isChunkResultMessage(data) {
+  return Number.isInteger(data?.chunk_id) && Array.isArray(data?.sentences);
+}
+
+function handleModelStatus(data) {
+  if (!modelSwitchWaiter) return;
+  clearTimeout(modelSwitchWaiter.timerId);
+  const { resolve, reject } = modelSwitchWaiter;
+  modelSwitchWaiter = null;
+  if (data.error) {
+    reject(new Error(data.error));
+    return;
+  }
+  LOG(`[MSG] 模型确认: ${data.current_model} loading=${data.loading}`);
+  resolve(data);
+}
+
+function markChunkCompleted(chunkId) {
+  if (completedChunkIds.has(chunkId)) {
+    LOG(`[WS] chunk_id=${chunkId} 重复返回，忽略计数`);
+    return;
+  }
+
+  completedChunkIds.add(chunkId);
+  chunksReceived = completedChunkIds.size;
+  LOG(`[WS] 进度: ${chunksReceived}/${totalChunks}`);
+
+  if (!allDoneSent && chunksReceived >= totalChunks) {
+    allDoneSent = true;
+    LOG('[WS] 所有块处理完毕，发送 ALL_DONE');
+    chrome.runtime.sendMessage({ type: 'ALL_DONE' });
+  }
+}
+
+function waitForModelSwitch() {
+  return new Promise((resolve, reject) => {
+    const timerId = setTimeout(() => {
+      modelSwitchWaiter = null;
+      reject(new Error('模型切换超时（30s）'));
+    }, MODEL_SWITCH_TIMEOUT_MS);
+    modelSwitchWaiter = { resolve, reject, timerId };
+  });
+}
 
 // ════════════════════════════════════════════════════════
 //  音频下载 & 解码
@@ -205,13 +286,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   currentModel = msg.model ?? 'qwen3';
   // VibeVoice 支持 60 分钟单次推理，发 1 个 chunk；Qwen3 分 5 块
   const n = currentModel === 'vibevoice' ? 1 : (msg.totalChunks ?? 5);
+  const sessionId = ++currentSessionId;
 
   LOG(`[MSG] PROCESS_AUDIO model=${currentModel} chunks=${n}`);
-  totalChunks    = n;
-  chunksReceived = 0;
-  pendingChunks  = [];
-  processing     = false;
-  chunksQueued   = 0;
+  resetProcessingState(n);
 
   (async () => {
     try {
@@ -222,26 +300,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       // 通知服务端切换模型，等待确认
       const modelMsg = JSON.stringify({ type: 'set_model', model: currentModel });
       LOG(`[MSG] 发送 set_model: ${modelMsg}`);
+      const modelSwitchPromise = waitForModelSwitch();
       ws.send(modelMsg);
-
-      await new Promise((resolve, reject) => {
-        const tid = setTimeout(() => reject(new Error('模型切换超时（30s）')), 30000);
-        const handler = (e) => {
-          try {
-            const data = JSON.parse(e.data);
-            if (data.type === 'model_status') {
-              clearTimeout(tid);
-              ws.removeEventListener('message', handler);
-              if (data.error) { reject(new Error(data.error)); }
-              else { LOG(`[MSG] 模型确认: ${data.current_model} loading=${data.loading}`); resolve(); }
-            }
-          } catch {}
-        };
-        ws.addEventListener('message', handler);
-      });
+      await modelSwitchPromise;
 
       const buf = await fetchAudio(msg.audioUrl);
       const { samples, duration } = await decodeAndResample(buf);
+      if (sessionId !== currentSessionId) return;
 
       // 根据实际音频时长动态调整块数，确保每块（含尾部重叠）不超过服务端截断上限
       if (currentModel !== 'vibevoice') {

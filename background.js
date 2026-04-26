@@ -8,6 +8,10 @@
 
 const LOG = (...a) => console.log('[BiliSub BG]', ...a);
 const ERR = (...a) => console.error('[BiliSub BG]', ...a);
+const OFFSCREEN_DOCUMENT_URL = 'offscreen.html';
+// 使用不会被 30 秒静默自动回收的 offscreen reason，避免长时 ASR 任务中途断开。
+const OFFSCREEN_REASONS = ['WORKERS'];
+const OFFSCREEN_JUSTIFICATION = 'Decode audio and maintain a long-lived offscreen document for ASR';
 
 const TOTAL_CHUNKS = 5;   // 把音频分成几块顺序处理
 
@@ -71,9 +75,9 @@ async function ensureOffscreen() {
   if (!exists) {
     LOG('[Offscreen] 创建 offscreen 文档');
     await chrome.offscreen.createDocument({
-      url: 'offscreen.html',
-      reasons: ['AUDIO_PLAYBACK'],
-      justification: 'Decode and resample Bilibili audio for ASR',
+      url: OFFSCREEN_DOCUMENT_URL,
+      reasons: OFFSCREEN_REASONS,
+      justification: OFFSCREEN_JUSTIFICATION,
     });
     LOG('[Offscreen] offscreen 文档已创建');
   } else {
