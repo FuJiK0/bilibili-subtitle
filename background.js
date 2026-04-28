@@ -21,34 +21,22 @@ const TOTAL_CHUNKS = 5; // ASR 默认分块数
 //  统一封装 sendMessage，避免调用处散落 .catch 处理
 // ════════════════════════════════════════════════════════
 const Msg = {
-  /**
-   * 向指定 Tab 的 content.js 发送消息
-   * @param {number} tabId
-   * @param {object} msg
-   */
+  /** 向指定 Tab 的 content.js 发送消息 */
   toTab: (tabId, msg) =>
     chrome.tabs
       .sendMessage(tabId, msg)
       .catch((e) => LOG("→tab err:", e.message)),
 
-  /**
-   * 向 popup 广播消息（popup 未开启时静默失败）
-   * @param {object} msg
-   */
+  /** 向 popup 广播消息（popup 未开启时静默失败） */
   toPopup: (msg) =>
     chrome.runtime.sendMessage({ _to: "popup", ...msg }).catch(() => {}),
 };
 
 // ════════════════════════════════════════════════════════
 //  B站 API 模块
-//  封装所有与 bilibili.com 接口的交互
 // ════════════════════════════════════════════════════════
 const BiliAPI = {
-  /**
-   * BV 号 → 视频元数据（包含 cid / title / duration）
-   * @param {string} bvid
-   * @returns {Promise<object>} data.data
-   */
+  /** BV 号 → 视频元数据（cid / title / duration） */
   async getVideoInfo(bvid) {
     LOG(`[BiliAPI] getVideoInfo: ${bvid}`);
     const res = await fetch(
@@ -62,15 +50,10 @@ const BiliAPI = {
     LOG(
       `[BiliAPI] 视频「${data.data.title}」 cid=${data.data.cid} duration=${data.data.duration}s`,
     );
-    return data.data; // .cid, .title, .duration, ...
+    return data.data;
   },
 
-  /**
-   * bvid + cid → 最高码率纯音频流 URL
-   * @param {string} bvid
-   * @param {number} cid
-   * @returns {Promise<string>} 音频 URL
-   */
+  /** bvid + cid → 最高码率纯音频流 URL */
   async getAudioStreamUrl(bvid, cid) {
     LOG(`[BiliAPI] getAudioStreamUrl: bvid=${bvid} cid=${cid}`);
     const res = await fetch(
@@ -86,7 +69,6 @@ const BiliAPI = {
     if (!audios?.length)
       throw new Error("未找到音频流（可能需要登录或视频无音频）");
 
-    // 按码率降序选最高质量
     audios.sort((a, b) => b.bandwidth - a.bandwidth);
     const best = audios[0];
     const url = best.baseUrl || best.base_url || best.backupUrl?.[0];
@@ -98,28 +80,55 @@ const BiliAPI = {
   },
 
   /**
-   * bvid + cid → 官方字幕列表（可能为空数组）
-   * 每项包含 { lan, lan_doc, subtitle_url }
-   * @param {string} bvid
-   * @param {number} cid
-   * @returns {Promise<Array>}
+   * [P3 FIX] bvid + cid → 官方字幕列表
+   *
+   * 错误分级（不再一律静默降级为"无字幕"）：
+   *   - 网络异常 / HTTP 4xx-5xx → throw，由调用方决定中止还是展示错误
+   *   - B站业务 code !== 0     → ERR 记录后返回 []（可能是非鉴权类的已知无内容码）
+   *   - data.subtitle 字段缺失  → LOG warn 后返回 []（接口结构变化的兜底）
+   *
+   * @returns {Promise<Array<{lan, lan_doc, subtitle_url}>>}
    */
   async getSubtitleList(bvid, cid) {
     LOG(`[BiliAPI] getSubtitleList: bvid=${bvid} cid=${cid}`);
-    const res = await fetch(
-      `https://api.bilibili.com/x/player/v2?bvid=${bvid}&cid=${cid}`,
-      { credentials: "include" },
-    );
+    let res;
+    try {
+      res = await fetch(
+        `https://api.bilibili.com/x/player/v2?bvid=${bvid}&cid=${cid}`,
+        { credentials: "include" },
+      );
+    } catch (networkErr) {
+      throw new Error(`字幕接口网络异常: ${networkErr.message}`);
+    }
+
     if (!res.ok) {
-      LOG(`[BiliAPI] 字幕接口 HTTP ${res.status}，视为无字幕`);
-      return [];
+      const hint =
+        res.status === 401 || res.status === 403
+          ? "（请检查 B站登录状态）"
+          : res.status === 429
+            ? "（请求过于频繁，稍后重试）"
+            : "";
+      throw new Error(`字幕接口 HTTP ${res.status} ${hint}`.trim());
     }
+
     const data = await res.json();
+
     if (data.code !== 0) {
-      LOG(`[BiliAPI] 字幕API code=${data.code}，视为无字幕`);
+      // 业务错误码不等于"真的没字幕"，明确记录以便排查
+      ERR(
+        `[BiliAPI] 字幕API 业务错误 code=${data.code} msg="${data.message}"，返回空字幕列表`,
+      );
       return [];
     }
-    const subtitles = data.data?.subtitle?.subtitles ?? [];
+
+    if (!data.data?.subtitle) {
+      LOG(
+        "[BiliAPI] data.data.subtitle 字段缺失，接口结构可能变更，返回空列表",
+      );
+      return [];
+    }
+
+    const subtitles = data.data.subtitle.subtitles ?? [];
     LOG(
       `[BiliAPI] 字幕数量: ${subtitles.length}`,
       subtitles.map((s) => s.lan_doc),
@@ -128,13 +137,10 @@ const BiliAPI = {
   },
 
   /**
-   * 下载 B站字幕 JSON，返回纯文本（行拼接，保留时序）
+   * 下载 B站字幕 JSON → 纯文本（按行拼接）
    * 字幕 JSON 格式：{ body: [{from, to, content}] }
-   * @param {string} subtitleUrl
-   * @returns {Promise<string>} 字幕纯文本
    */
   async downloadSubtitleText(subtitleUrl) {
-    // B站字幕 URL 有时以 // 开头，需补全协议
     const url = subtitleUrl.startsWith("//")
       ? `https:${subtitleUrl}`
       : subtitleUrl;
@@ -152,17 +158,10 @@ const BiliAPI = {
 
 // ════════════════════════════════════════════════════════
 //  本地 LLM 总结模块
-//  通过 OpenAI-compatible API 调用本地模型进行视频总结
 // ════════════════════════════════════════════════════════
 const SummaryAPI = {
-  /** 本地 LLM 服务地址（OpenAI-compatible） */
   BASE_URL: "http://127.0.0.1:8000/v1",
 
-  /**
-   * 构建总结 prompt
-   * @param {string} subtitleText
-   * @returns {string}
-   */
   buildPrompt(subtitleText) {
     return `请根据以下视频字幕内容，用中文生成一份简洁的视频总结。要求：
 1. 先用 1-2 句话概括视频主旨
@@ -174,11 +173,20 @@ ${subtitleText}`;
   },
 
   /**
-   * 流式调用本地 LLM 总结字幕文本
-   * @param {string} subtitleText - 待总结的字幕/转写文本
-   * @param {function} onChunk   - 流式回调 (delta: string) => void
-   * @param {function} onDone    - 完成回调 (fullText: string) => void
-   * @returns {Promise<void>}
+   * [P1 FIX] 流式调用本地 LLM，使用行缓冲区解决 SSE 跨网络分片问题
+   *
+   * 问题：reader.read() 返回的每个 Uint8Array 是网络层的任意分片，
+   *       一条 SSE "data: {...}" 行可能被拆成两段到达。
+   *       旧代码直接 split('\n') 后 JSON.parse，前半段 parse 失败被吞，
+   *       后半段缺少 "data: " 前缀也被跳过，导致随机丢字。
+   *
+   * 修复：维护 lineBuffer，只在遇到 \n 时才提交完整行处理；
+   *       TextDecoder 以 { stream: true } 模式运行，保留多字节字符跨块状态；
+   *       循环结束后 flush decoder 并处理最后一行残余。
+   *
+   * @param {string}   subtitleText
+   * @param {function} onChunk  - (delta: string) => void
+   * @param {function} onDone   - (fullText: string) => void
    */
   async summarize(subtitleText, onChunk, onDone) {
     const prompt = this.buildPrompt(subtitleText);
@@ -188,7 +196,7 @@ ${subtitleText}`;
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "default", // 本地服务通常不限 model 名称
+        model: "default",
         messages: [{ role: "user", content: prompt }],
         stream: true,
         max_tokens: 1024,
@@ -201,29 +209,45 @@ ${subtitleText}`;
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let fullText = "";
+    let lineBuffer = ""; // 保留跨分片的不完整行，等到 \n 才提交
+
+    /** 解析并分发一条完整的 SSE 行 */
+    const parseLine = (line) => {
+      if (!line.startsWith("data: ")) return;
+      const payload = line.slice(6).trim();
+      if (!payload || payload === "[DONE]") return;
+      try {
+        const chunk = JSON.parse(payload);
+        const delta = chunk.choices?.[0]?.delta?.content ?? "";
+        if (delta) {
+          fullText += delta;
+          onChunk(delta);
+        }
+      } catch (e) {
+        ERR(
+          "[SummaryAPI] SSE JSON 解析失败:",
+          e.message,
+          "原始行:",
+          line.slice(0, 80),
+        );
+      }
+    };
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const raw = decoder.decode(value, { stream: true });
-      // SSE 格式：每行 "data: {...}" 或 "data: [DONE]"
-      for (const line of raw.split("\n")) {
-        if (!line.startsWith("data: ")) continue;
-        const payload = line.slice(6).trim();
-        if (payload === "[DONE]") continue;
-        try {
-          const chunk = JSON.parse(payload);
-          const delta = chunk.choices?.[0]?.delta?.content ?? "";
-          if (delta) {
-            fullText += delta;
-            onChunk(delta);
-          }
-        } catch {
-          /* 忽略非 JSON 行 */
-        }
-      }
+      // stream: true 让 decoder 保留多字节字符的跨 chunk 状态
+      lineBuffer += decoder.decode(value, { stream: true });
+
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop(); // 最后一段没有 \n，留给下次拼接
+      for (const line of lines) parseLine(line.trimEnd());
     }
+
+    // 流结束后 flush decoder 残留字节，并处理最后可能没有 \n 结尾的行
+    lineBuffer += decoder.decode();
+    if (lineBuffer) parseLine(lineBuffer.trimEnd());
 
     LOG(`[SummaryAPI] 总结完成，共 ${fullText.length} 字`);
     onDone(fullText);
@@ -233,8 +257,6 @@ ${subtitleText}`;
 // ════════════════════════════════════════════════════════
 //  Offscreen 文档管理
 // ════════════════════════════════════════════════════════
-
-/** 确保 offscreen 文档存在（已存在则复用） */
 async function ensureOffscreen() {
   const exists = await chrome.offscreen.hasDocument();
   if (!exists) {
@@ -254,36 +276,46 @@ async function ensureOffscreen() {
 //  全局任务状态
 // ════════════════════════════════════════════════════════
 
-/** @type {{ activeTabId:number|null, allWords:Array, chunksReceived:number, totalChunks:number, summaryPending:boolean }} */
+/**
+ * @type {{
+ *   activeTabId:    number|null,
+ *   sessionId:      number,        // [P2] 单调递增版本号，随 PROCESS_AUDIO 下发到 offscreen
+ *   allWords:       Array,         // 所有 chunk 汇总的句子，按 start 升序
+ *   chunksReceived: number,
+ *   totalChunks:    number,
+ *   summaryPending: boolean,       // true = ASR 完成后自动触发总结
+ * }}
+ */
 let state = {
   activeTabId: null,
-  allWords: [], // 所有 chunk 汇总的句子，按 start 升序
+  sessionId: 0,
+  allWords: [],
   chunksReceived: 0,
   totalChunks: TOTAL_CHUNKS,
-  summaryPending: false, // true = ASR 完成后自动触发总结
+  summaryPending: false,
 };
 
-/** 重置任务状态，绑定到新 tabId */
+/**
+ * [P2 FIX] 重置任务状态并生成新 sessionId
+ * sessionId 递增后，旧任务在 offscreen 的 WS 回包会因 sessionId 不匹配而被丢弃，
+ * 防止串任务时旧结果污染新任务进度和 allWords。
+ */
 function resetState(tabId) {
+  const newSessionId = state.sessionId + 1;
   state = {
     activeTabId: tabId,
+    sessionId: newSessionId,
     allWords: [],
     chunksReceived: 0,
     totalChunks: TOTAL_CHUNKS,
     summaryPending: false,
   };
+  LOG(`[State] 新任务 sessionId=${newSessionId} tabId=${tabId}`);
 }
 
 // ════════════════════════════════════════════════════════
 //  字幕提取主流程
 // ════════════════════════════════════════════════════════
-
-/**
- * 启动 ASR 字幕提取
- * @param {string} bvid
- * @param {number} tabId
- * @param {string} [model='qwen3']
- */
 async function startProcessing(bvid, tabId, model = "qwen3") {
   LOG(`==== startProcessing: bvid=${bvid} tabId=${tabId} model=${model} ====`);
   resetState(tabId);
@@ -306,10 +338,11 @@ async function startProcessing(bvid, tabId, model = "qwen3") {
     Msg.toPopup({ type: "PROCESSING_START", title: info.title });
 
     await ensureOffscreen();
-    LOG("[BG] 发送 PROCESS_AUDIO 到 offscreen");
+    LOG(`[BG] 发送 PROCESS_AUDIO 到 offscreen sessionId=${state.sessionId}`);
     chrome.runtime.sendMessage({
       _to: "offscreen",
       type: "PROCESS_AUDIO",
+      sessionId: state.sessionId, // [P2] 随任务下发，offscreen 回包时带回
       audioUrl,
       model,
       totalChunks: TOTAL_CHUNKS,
@@ -324,15 +357,6 @@ async function startProcessing(bvid, tabId, model = "qwen3") {
 // ════════════════════════════════════════════════════════
 //  视频总结主流程
 // ════════════════════════════════════════════════════════
-
-/**
- * 启动视频总结：
- *   有官方字幕 → 直接下载 → 调用 LLM 总结
- *   无官方字幕 → 先 ASR 转写 → ALL_DONE 后触发 LLM 总结
- * @param {string} bvid
- * @param {number} tabId
- * @param {string} [model='qwen3']
- */
 async function startSummarize(bvid, tabId, model = "qwen3") {
   LOG(`==== startSummarize: bvid=${bvid} tabId=${tabId} model=${model} ====`);
   resetState(tabId);
@@ -351,11 +375,10 @@ async function startSummarize(bvid, tabId, model = "qwen3") {
       message: `「${info.title}」`,
     });
 
-    // ── 尝试获取官方字幕 ─────────────────────────────────────
+    // [P3] getSubtitleList 现在会对真实错误 throw，而非静默返回 []
     const subtitleList = await BiliAPI.getSubtitleList(bvid, info.cid);
 
     if (subtitleList.length > 0) {
-      // 优先中文字幕，其次取第一个
       const target =
         subtitleList.find((s) => s.lan.startsWith("zh")) ?? subtitleList[0];
       LOG(`[Summary] 发现官方字幕: ${target.lan_doc} (${target.lan})`);
@@ -364,14 +387,12 @@ async function startSummarize(bvid, tabId, model = "qwen3") {
         status: "loading",
         message: `使用官方字幕（${target.lan_doc}）下载中...`,
       });
-
       const subtitleText = await BiliAPI.downloadSubtitleText(
         target.subtitle_url,
       );
-      LOG(`[Summary] 字幕文本就绪，${subtitleText.length} 字符，开始总结`);
+      LOG(`[Summary] 字幕文本就绪，${subtitleText.length} 字符`);
       await runSummary(subtitleText, tabId);
     } else {
-      // ── 无官方字幕：启动 ASR，ALL_DONE 后再总结 ─────────────
       LOG("[Summary] 无官方字幕，启动 ASR 转写...");
       Msg.toPopup({
         type: "SUMMARY_STATUS",
@@ -379,18 +400,20 @@ async function startSummarize(bvid, tabId, model = "qwen3") {
         message: "无官方字幕，AI 转写中（完成后自动总结）...",
       });
 
-      state.summaryPending = true; // 标记：ALL_DONE 后执行总结
+      state.summaryPending = true;
       const audioUrl = await BiliAPI.getAudioStreamUrl(bvid, info.cid);
       await ensureOffscreen();
-      LOG("[BG] 发送 PROCESS_AUDIO 到 offscreen（总结模式）");
+      LOG(
+        `[BG] 发送 PROCESS_AUDIO 到 offscreen（总结模式）sessionId=${state.sessionId}`,
+      );
       chrome.runtime.sendMessage({
         _to: "offscreen",
         type: "PROCESS_AUDIO",
+        sessionId: state.sessionId, // [P2]
         audioUrl,
         model,
         totalChunks: TOTAL_CHUNKS,
       });
-      // 后续由 ALL_DONE 消息触发 runSummary
     }
   } catch (err) {
     ERR(`startSummarize 失败: ${err.message}`);
@@ -400,7 +423,7 @@ async function startSummarize(bvid, tabId, model = "qwen3") {
 
 /**
  * 执行 LLM 总结并将结果流式推送到 popup
- * @param {string} text   - 字幕/转写文本
+ * @param {string} text
  * @param {number} tabId
  */
 async function runSummary(text, tabId) {
@@ -418,13 +441,12 @@ async function runSummary(text, tabId) {
       (full) => {
         LOG(`[Summary] 总结完成，共 ${full.length} 字`);
         Msg.toPopup({ type: "SUMMARY_DONE", text: full });
-        if (tabId) {
+        if (tabId)
           Msg.toTab(tabId, {
             type: "STATUS",
             status: "ready",
             message: "视频总结已生成 ✅",
           });
-        }
       },
     );
   } catch (err) {
@@ -438,27 +460,34 @@ async function runSummary(text, tabId) {
 // ════════════════════════════════════════════════════════
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // 不属于 background 的消息，忽略
   if (msg._to && msg._to !== "background") return;
 
   LOG(`[MSG] type=${msg.type} from=${sender.url?.slice(0, 60) ?? "unknown"}`);
 
-  // ── popup → START（字幕提取）─────────────────────────────
+  // ── popup → START ─────────────────────────────────────
   if (msg.type === "START") {
     startProcessing(msg.bvid, msg.tabId, msg.model ?? "qwen3");
     sendResponse({ ok: true });
     return true;
   }
 
-  // ── popup → SUMMARIZE（视频总结）──────────────────────────
+  // ── popup → SUMMARIZE ─────────────────────────────────
   if (msg.type === "SUMMARIZE") {
     startSummarize(msg.bvid, msg.tabId, msg.model ?? "qwen3");
     sendResponse({ ok: true });
     return true;
   }
 
-  // ── offscreen → CHUNK_DONE ────────────────────────────────
+  // ── offscreen → CHUNK_DONE ────────────────────────────
   if (msg.type === "CHUNK_DONE") {
+    // [P2 FIX] 校验 sessionId，丢弃旧任务的晚到回包
+    if (msg.sessionId !== state.sessionId) {
+      LOG(
+        `[CHUNK_DONE] 丢弃旧任务回包 sessionId=${msg.sessionId}（当前=${state.sessionId}）`,
+      );
+      return true;
+    }
+
     const { chunk_id, sentences } = msg;
     LOG(`[CHUNK_DONE] chunk_id=${chunk_id} | ${sentences.length} 句`);
 
@@ -471,14 +500,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     );
 
     if (state.summaryPending) {
-      // 总结模式：只上报进度，不推送字幕到 content.js
       Msg.toPopup({
         type: "SUMMARY_PROGRESS",
         progress,
         message: `转写中 ${progress}%（${state.allWords.length} 句）`,
       });
     } else {
-      // 普通字幕模式：推送字幕到页面
       if (state.activeTabId) {
         Msg.toTab(state.activeTabId, {
           type: "WORDS_UPDATE",
@@ -496,56 +523,64 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // ── offscreen → CHUNKS_TOTAL（动态扩容通知）──────────────
+  // ── offscreen → CHUNKS_TOTAL ──────────────────────────
   if (msg.type === "CHUNKS_TOTAL") {
+    // [P2 FIX] 同样校验 sessionId
+    if (msg.sessionId !== state.sessionId) {
+      LOG(`[CHUNKS_TOTAL] 丢弃旧任务消息 sessionId=${msg.sessionId}`);
+      return true;
+    }
     LOG(`[CHUNKS_TOTAL] 总块数更新: ${state.totalChunks} → ${msg.total}`);
     state.totalChunks = msg.total;
     return true;
   }
 
-  // ── offscreen → ALL_DONE ──────────────────────────────────
+  // ── offscreen → ALL_DONE ──────────────────────────────
   if (msg.type === "ALL_DONE") {
+    // [P2 FIX] 同样校验 sessionId，防止旧任务提前触发 ALL_DONE 或总结
+    if (msg.sessionId !== state.sessionId) {
+      LOG(
+        `[ALL_DONE] 丢弃旧任务回包 sessionId=${msg.sessionId}（当前=${state.sessionId}）`,
+      );
+      return true;
+    }
+
     LOG(
       `[ALL_DONE] 共 ${state.allWords.length} 句 | summaryPending=${state.summaryPending}`,
     );
 
     if (state.summaryPending) {
-      // ASR 完成 → 转入总结流程
       state.summaryPending = false;
       const text = state.allWords.map((s) => s.text).join("\n");
       LOG(`[ALL_DONE→Summary] 转写文本 ${text.length} 字符，开始总结`);
       runSummary(text, state.activeTabId);
     } else {
-      // 普通字幕模式
-      if (state.activeTabId) {
+      if (state.activeTabId)
         Msg.toTab(state.activeTabId, {
           type: "ALL_DONE",
           sentences: state.allWords,
         });
-      }
       Msg.toPopup({ type: "ALL_DONE", wordsCount: state.allWords.length });
     }
     return true;
   }
 
-  // ── offscreen → WS_STATUS ─────────────────────────────────
+  // ── offscreen → WS_STATUS ─────────────────────────────
   if (msg.type === "WS_STATUS") {
     LOG(`[WS_STATUS] connected=${msg.connected}`);
     Msg.toPopup(msg);
     return true;
   }
 
-  // ── any → ERROR ───────────────────────────────────────────
+  // ── any → ERROR ───────────────────────────────────────
   if (msg.type === "ERROR") {
     ERR(`[ERROR] ${msg.message}`);
-    if (state.activeTabId) {
+    if (state.activeTabId)
       Msg.toTab(state.activeTabId, {
         type: "STATUS",
         status: "error",
         message: msg.message,
       });
-    }
-    // 总结模式和字幕模式使用不同的错误类型，便于 popup 区分展示
     const errType = state.summaryPending ? "SUMMARY_ERROR" : "ERROR";
     Msg.toPopup({ type: errType, message: msg.message });
     return true;
