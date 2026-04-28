@@ -115,7 +115,8 @@ function connectWS() {
         connected: false,
         error: true,
       });
-      chrome.runtime.sendMessage({
+      // [Fix 2] 用 sendToBg 而非裸 sendMessage，确保 ERROR 携带 sessionId 通过会话隔离校验
+      sendToBg({
         type: "ERROR",
         message:
           "WebSocket 连接失败，请确认 server_mlx.py 已启动 (ws://localhost:8765)",
@@ -177,8 +178,22 @@ function markChunkCompleted(chunkId) {
   }
 }
 
-/** 等待服务端确认模型切换（带 30s 超时） */
+/** 等待服务端确认模型切换（带 30s 超时）
+ *
+ * [Fix 1] modelSwitchWaiter 是单例。若上一个等待还未结束就又调用本函数
+ * （快速连续点击、串任务等场景），新 Promise 会覆盖旧句柄，旧 Promise 的
+ * resolve/reject 永远不会被调用，导致前一个任务挂起直至超时。
+ * 修复：创建新 waiter 前先 reject 并清理已有的 waiter。
+ */
 function waitForModelSwitch() {
+  // 若已有等待中的 waiter，立即以错误拒绝，防止悬挂
+  if (modelSwitchWaiter) {
+    LOG("[ModelSwitch] 中断上一个未完成的模型切换等待");
+    clearTimeout(modelSwitchWaiter.timerId);
+    modelSwitchWaiter.reject(new Error("被新任务中断"));
+    modelSwitchWaiter = null;
+  }
+
   return new Promise((resolve, reject) => {
     const timerId = setTimeout(() => {
       modelSwitchWaiter = null;

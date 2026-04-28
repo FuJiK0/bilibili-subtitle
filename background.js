@@ -375,8 +375,21 @@ async function startSummarize(bvid, tabId, model = "qwen3") {
       message: `「${info.title}」`,
     });
 
-    // [P3] getSubtitleList 现在会对真实错误 throw，而非静默返回 []
-    const subtitleList = await BiliAPI.getSubtitleList(bvid, info.cid);
+    // [Fix 3] getSubtitleList 的网络/HTTP 异常不再向上抛出终止整个流程，
+    // 而是捕获后记录警告，降级到 ASR 路径继续执行。
+    // 只有 getVideoInfo / getAudioStreamUrl 等核心接口失败才会终止。
+    let subtitleList = [];
+    try {
+      subtitleList = await BiliAPI.getSubtitleList(bvid, info.cid);
+    } catch (subtitleErr) {
+      ERR(`[Summary] 字幕接口异常，降级到 ASR 路径: ${subtitleErr.message}`);
+      Msg.toPopup({
+        type: "SUMMARY_STATUS",
+        status: "asr",
+        message: `字幕获取失败（${subtitleErr.message}），改用 AI 转写...`,
+      });
+      // subtitleList 保持 []，下方逻辑自然走 ASR 分支
+    }
 
     if (subtitleList.length > 0) {
       const target =
