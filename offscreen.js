@@ -1,11 +1,4 @@
 // offscreen.js — 音频解码 + WebSocket 通信
-// 职责：
-//   1. 从 B站 CDN 下载音频（AAC/OPUS in fMP4）
-//   2. Web Audio API 解码 → OfflineAudioContext 重采样到 16kHz mono
-//   3. 均分为 N 块，每块附带 time_offset
-//   4. 顺序发送到 WS（等响应后再发下一块，保证顺序）
-//   5. 每块收到结果后立即上报 background（CHUNK_DONE）
-//   6. 全部完成后发 ALL_DONE
 
 const LOG = (...a) => console.log("[BiliSub Offscreen]", ...a);
 const ERR = (...a) => console.error("[BiliSub Offscreen]", ...a);
@@ -15,6 +8,8 @@ const TARGET_SR = 16000;
 const TARGET_CHUNK_SECS = 55;
 const OVERLAP_SECS = 1.5;
 const MODEL_SWITCH_TIMEOUT_MS = 30000;
+const TASK_CANCELLED_ERROR = "任务已取消";
+const WAITER_REPLACED_ERROR = "被新调用覆盖";
 
 // ════════════════════════════════════════════════════════
 //  全局任务状态
@@ -23,20 +18,21 @@ const MODEL_SWITCH_TIMEOUT_MS = 30000;
 /** @type {WebSocket|null} */
 let ws = null;
 
-/** @type {Array<{pcm, timeOffset, chunkId, overlapAfter}>} 待发队列 */
+/** @type {Array<{pcm, timeOffset, chunkId, overlapAfter}>} */
 let pendingChunks = [];
 
 let processing = false;
 let totalChunks = 5;
 let chunksQueued = 0;
-
-/** 已收到响应的 chunk_id 集合（防重复计数） */
 let completedChunkIds = new Set();
 
-/** [P2] background 下发的任务版本号，所有回包须携带此 ID 才会被 background 接受 */
+/**
+ * background 下发的任务版本号。
+ * 所有 sendToBg 调用都会快照当前值，background 侧据此过滤过期回包。
+ */
 let activeSessionId = 0;
 
-/** 用于丢弃旧任务在下载/解码阶段的残留回调 */
+/** 本地异步操作（下载/解码）的取消版本号 */
 let currentLocalSession = 0;
 
 let allDoneSent = false;
@@ -51,25 +47,48 @@ window.addEventListener("beforeunload", () => LOG("[Lifecycle] beforeunload"));
 // ════════════════════════════════════════════════════════
 
 /**
- * 向 background 发送消息，自动附加 sessionId 以供 background 做会话校验
- * @param {object} msg
+ * 向 background 发消息并附加 sessionId。
+ * 注意：此函数在调用时读取全局 activeSessionId，
+ * ws 回调（onerror/onclose/onmessage）必须使用创建时快照的 boundSessionId，
+ * 不能直接调用本函数——见 connectWS 内部的 sendWithSession。
  */
 const sendToBg = (msg) =>
   chrome.runtime.sendMessage({ ...msg, sessionId: activeSessionId });
+
+/** 向 background 发消息并绑定指定 sessionId。 */
+const sendToBgWithSession = (msg, sessionId) =>
+  chrome.runtime.sendMessage({ ...msg, sessionId });
 
 // ════════════════════════════════════════════════════════
 //  WebSocket 模块
 // ════════════════════════════════════════════════════════
 
+/**
+ * 建立 WebSocket 连接。
+ *
+ * [Fix 2] WS 回调（onerror / onclose / onmessage）绑定创建时的 sessionId 快照
+ * （boundSessionId），而不是运行时读取全局 activeSessionId。
+ *
+ * 原因：新任务调用 resetProcessingState 后 activeSessionId 已推进，
+ * 但旧 socket 的 onerror/onclose 可能晚于此时触发，若读全局值会把
+ * 旧 socket 的错误挂到新任务上，绕过会话隔离。
+ */
 function connectWS() {
+  // 快照当前 sessionId，整个 socket 生命周期内的回调都使用此值
+  const boundSessionId = activeSessionId;
+
+  /** 带绑定 session 的发送辅助，仅供本 socket 的回调使用 */
+  const sendBound = (msg) =>
+    chrome.runtime.sendMessage({ ...msg, sessionId: boundSessionId });
+
   return new Promise((resolve, reject) => {
-    LOG(`[WS] 连接 ${WS_URL}...`);
+    LOG(`[WS] 连接 ${WS_URL}... (boundSessionId=${boundSessionId})`);
     ws = new WebSocket(WS_URL);
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
       LOG("[WS] 已连接 ✓");
-      // WS_STATUS 不携带 sessionId（全局状态，非任务相关）
+      // WS_STATUS 是全局连接状态，不属于任何任务，不需要 sessionId
       chrome.runtime.sendMessage({ type: "WS_STATUS", connected: true });
       resolve();
     };
@@ -97,26 +116,26 @@ function connectWS() {
 
       const { chunk_id, sentences } = data;
       LOG(
-        `[WS] chunk_id=${chunk_id} sessionId=${activeSessionId} | ${sentences?.length ?? 0} 句`,
+        `[WS] chunk_id=${chunk_id} boundSession=${boundSessionId} | ${sentences?.length ?? 0} 句`,
       );
 
-      // sendToBg 会自动附加当前 activeSessionId，background 侧校验
-      sendToBg({ type: "CHUNK_DONE", chunk_id, sentences: sentences ?? [] });
-      markChunkCompleted(chunk_id);
+      // 使用 sendBound：响应属于此 socket 所服务的任务
+      sendBound({ type: "CHUNK_DONE", chunk_id, sentences: sentences ?? [] });
+      markChunkCompleted(chunk_id, sendBound);
 
       processing = false;
       drainQueue();
     };
 
     ws.onerror = () => {
-      ERR("[WS] 连接错误，请确认 server_mlx.py 已启动");
+      ERR(`[WS] 连接错误 (boundSessionId=${boundSessionId})`);
       chrome.runtime.sendMessage({
         type: "WS_STATUS",
         connected: false,
         error: true,
       });
-      // [Fix 2] 用 sendToBg 而非裸 sendMessage，确保 ERROR 携带 sessionId 通过会话隔离校验
-      sendToBg({
+      // 使用 sendBound 确保错误归属正确的任务，而非运行时最新的 activeSessionId
+      sendBound({
         type: "ERROR",
         message:
           "WebSocket 连接失败，请确认 server_mlx.py 已启动 (ws://localhost:8765)",
@@ -125,13 +144,13 @@ function connectWS() {
     };
 
     ws.onclose = () => {
-      LOG("[WS] 连接已关闭");
+      LOG(`[WS] 连接已关闭 (boundSessionId=${boundSessionId})`);
       chrome.runtime.sendMessage({ type: "WS_STATUS", connected: false });
       if (
         !allDoneSent &&
         (processing || pendingChunks.length > 0 || completedChunkIds.size > 0)
       ) {
-        sendToBg({
+        sendBound({
           type: "ERROR",
           message: `WebSocket 连接中断（${completedChunkIds.size}/${totalChunks} 块完成）`,
         });
@@ -160,10 +179,11 @@ function handleModelStatus(data) {
 }
 
 /**
- * 标记一个 chunk 完成，全部完成后广播 ALL_DONE
- * @param {number} chunkId
+ * 标记一个 chunk 完成；全部完成时广播 ALL_DONE。
+ * @param {number}   chunkId
+ * @param {function} sendFn - 绑定了正确 sessionId 的发送函数
  */
-function markChunkCompleted(chunkId) {
+function markChunkCompleted(chunkId, sendFn) {
   if (completedChunkIds.has(chunkId)) {
     LOG(`[WS] chunk_id=${chunkId} 重复返回，忽略`);
     return;
@@ -174,23 +194,23 @@ function markChunkCompleted(chunkId) {
   if (!allDoneSent && completedChunkIds.size >= totalChunks) {
     allDoneSent = true;
     LOG("[WS] 所有块处理完毕，发送 ALL_DONE");
-    sendToBg({ type: "ALL_DONE" });
+    sendFn({ type: "ALL_DONE" });
   }
 }
 
-/** 等待服务端确认模型切换（带 30s 超时）
+/**
+ * 等待服务端确认模型切换（带 30s 超时）。
  *
- * [Fix 1] modelSwitchWaiter 是单例。若上一个等待还未结束就又调用本函数
- * （快速连续点击、串任务等场景），新 Promise 会覆盖旧句柄，旧 Promise 的
- * resolve/reject 永远不会被调用，导致前一个任务挂起直至超时。
- * 修复：创建新 waiter 前先 reject 并清理已有的 waiter。
+ * modelSwitchWaiter 是单例。waitForModelSwitch 本身有"覆盖前先 reject"的保护，
+ * 但实际调用链是 resetProcessingState → waitForModelSwitch，
+ * resetProcessingState 必须是真正的取消边界（见下方）。
  */
 function waitForModelSwitch() {
-  // 若已有等待中的 waiter，立即以错误拒绝，防止悬挂
+  // 次级保护：若 resetProcessingState 未清理干净，这里补一刀
   if (modelSwitchWaiter) {
-    LOG("[ModelSwitch] 中断上一个未完成的模型切换等待");
+    LOG("[ModelSwitch] waitForModelSwitch 发现残留 waiter，强制 reject");
     clearTimeout(modelSwitchWaiter.timerId);
-    modelSwitchWaiter.reject(new Error("被新任务中断"));
+    modelSwitchWaiter.reject(new Error(WAITER_REPLACED_ERROR));
     modelSwitchWaiter = null;
   }
 
@@ -224,10 +244,6 @@ async function fetchAudio(url) {
   return buf;
 }
 
-/**
- * 解码音频并重采样到 16kHz mono Float32
- * @returns {Promise<{samples: Float32Array, duration: number}>}
- */
 async function decodeAndResample(arrayBuffer) {
   LOG("[Audio] 开始解码（Web Audio API）...");
   const t0 = performance.now();
@@ -242,7 +258,6 @@ async function decodeAndResample(arrayBuffer) {
     `[Audio] 解码完成: ${decoded.duration.toFixed(1)}s sr=${decoded.sampleRate}Hz ch=${decoded.numberOfChannels} 耗时${((performance.now() - t0) / 1000).toFixed(1)}s`,
   );
 
-  LOG(`[Audio] 重采样 → ${TARGET_SR}Hz mono...`);
   const t1 = performance.now();
   const outLen = Math.ceil(decoded.duration * TARGET_SR);
   const offCtx = new OfflineAudioContext(1, outLen, TARGET_SR);
@@ -253,7 +268,7 @@ async function decodeAndResample(arrayBuffer) {
   const resampled = await offCtx.startRendering();
   const samples = resampled.getChannelData(0);
   LOG(
-    `[Audio] 重采样完成: ${samples.length} samples 耗时${((performance.now() - t1) / 1000).toFixed(1)}s`,
+    `[Audio] 重采样完成: ${samples.length} samples @ ${TARGET_SR}Hz 耗时${((performance.now() - t1) / 1000).toFixed(1)}s`,
   );
   return { samples, duration: decoded.duration };
 }
@@ -262,10 +277,6 @@ async function decodeAndResample(arrayBuffer) {
 //  分块与队列模块
 // ════════════════════════════════════════════════════════
 
-/**
- * 将 PCM 样本均分为 n 块并推入发送队列
- * 每块末尾追加 OVERLAP_SECS 重叠上下文
- */
 function enqueueChunks(samples, duration, n) {
   const chunkLen = Math.floor(samples.length / n);
   const overlapSamp = Math.floor(OVERLAP_SECS * TARGET_SR);
@@ -292,7 +303,6 @@ function enqueueChunks(samples, duration, n) {
   }
 }
 
-/** Float32 [-1,1] → Int16 PCM */
 function float32ToInt16(f32) {
   const i16 = new Int16Array(f32.length);
   for (let i = 0; i < f32.length; i++) {
@@ -302,7 +312,6 @@ function float32ToInt16(f32) {
   return i16;
 }
 
-/** 从队列取出下一块发送；每次只处理一块，收到响应后再继续（顺序保证） */
 function drainQueue() {
   if (processing || pendingChunks.length === 0) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -328,17 +337,28 @@ function drainQueue() {
 }
 
 // ════════════════════════════════════════════════════════
-//  任务状态重置
+//  任务状态重置（取消边界）
 // ════════════════════════════════════════════════════════
 
 /**
- * 重置全部任务状态，为新任务做准备
- * @param {number} total    - 新任务总分块数
- * @param {number} sessionId - background 下发的任务版本号
+ * 重置全部任务状态，为新任务做准备。
+ *
+ * 这里是任务取消的唯一、明确边界：
+ *
+ * [Fix 1] modelSwitchWaiter 必须先调用 .reject() 再清空。
+ *   之前的写法是 `modelSwitchWaiter = null`，reject 从未被调用，
+ *   旧 Promise 会一直挂起直至 30s 超时，超时后还会触发一次错误路径。
+ *
+ * [Fix 2] activeSessionId 在此更新。connectWS 内的回调用快照值（boundSessionId），
+ *   所以旧 socket 的 onerror/onclose 不受此更新影响，不会打到新任务上。
  */
 function resetProcessingState(total, sessionId) {
   if (modelSwitchWaiter) {
+    LOG(
+      `[Reset] reject 旧 modelSwitchWaiter (session 即将从 ${activeSessionId} → ${sessionId})`,
+    );
     clearTimeout(modelSwitchWaiter.timerId);
+    modelSwitchWaiter.reject(new Error(TASK_CANCELLED_ERROR));
     modelSwitchWaiter = null;
   }
   totalChunks = total;
@@ -347,25 +367,24 @@ function resetProcessingState(total, sessionId) {
   chunksQueued = 0;
   completedChunkIds = new Set();
   allDoneSent = false;
-  activeSessionId = sessionId; // [P2] 更新会话 ID，后续所有 sendToBg 自动携带
-  LOG(`[State] 重置 totalChunks=${total} sessionId=${sessionId}`);
+  activeSessionId = sessionId;
+  LOG(`[State] 重置完成 totalChunks=${total} activeSessionId=${sessionId}`);
 }
 
 // ════════════════════════════════════════════════════════
 //  消息监听
 // ════════════════════════════════════════════════════════
 
-// ── PROCESS_AUDIO：启动 ASR 主流程 ────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg._to && msg._to !== "offscreen") return;
   if (msg.type !== "PROCESS_AUDIO") return;
 
   currentModel = msg.model ?? "qwen3";
   const n = currentModel === "vibevoice" ? 1 : (msg.totalChunks ?? 5);
+  const taskSessionId = msg.sessionId ?? 0;
 
-  // [P2] 保存 background 下发的 sessionId，并递增本地会话版本（用于下载/解码阶段的丢弃检查）
   const localSession = ++currentLocalSession;
-  resetProcessingState(n, msg.sessionId ?? 0);
+  resetProcessingState(n, taskSessionId);
 
   LOG(
     `[MSG] PROCESS_AUDIO model=${currentModel} chunks=${n} sessionId=${activeSessionId}`,
@@ -383,10 +402,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const buf = await fetchAudio(msg.audioUrl);
       const { samples, duration } = await decodeAndResample(buf);
 
-      // 下载/解码是异步的，结束时校验本地会话，防止旧任务继续入队
       if (localSession !== currentLocalSession) {
         LOG(
-          `[State] 下载/解码结果已过期（localSession=${localSession} 当前=${currentLocalSession}），丢弃`,
+          `[State] 下载/解码结果已过期（local ${localSession} 当前 ${currentLocalSession}），丢弃`,
         );
         return;
       }
@@ -398,15 +416,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             `[Chunk] 动态扩容: ${totalChunks} → ${minChunks} 块（${duration.toFixed(1)}s）`,
           );
           totalChunks = minChunks;
-          sendToBg({ type: "CHUNKS_TOTAL", total: totalChunks });
+          sendToBgWithSession({ type: "CHUNKS_TOTAL", total: totalChunks }, taskSessionId);
         }
       }
 
       enqueueChunks(samples, duration, totalChunks);
       drainQueue();
     } catch (err) {
+      if (
+        err.message === TASK_CANCELLED_ERROR ||
+        err.message === WAITER_REPLACED_ERROR ||
+        localSession !== currentLocalSession
+      ) {
+        LOG(
+          `[State] 忽略已取消任务的退出: sessionId=${taskSessionId} local=${localSession} current=${currentLocalSession} reason=${err.message}`,
+        );
+        return;
+      }
       ERR("处理流程失败:", err.message);
-      sendToBg({ type: "ERROR", message: err.message });
+      sendToBgWithSession({ type: "ERROR", message: err.message }, taskSessionId);
     }
   })();
 
@@ -414,7 +442,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
-// ── CHECK_WS：popup 探活 ──────────────────────────────────
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type !== "CHECK_WS") return;
   LOG("[MSG] CHECK_WS 探活");
