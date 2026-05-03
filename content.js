@@ -11,6 +11,8 @@ const LIST_UI = {
   sideViewportRatio: 0.62,
   floatingViewportRatio: 0.52,
   floatingMinHeight: 220,
+  dragEdgePadding: 8,
+  dragStartThreshold: 4,
 };
 
 let cues = []; // [{text, start, end}]  直接来自后端
@@ -25,6 +27,8 @@ let toastEl = null;
 let fontSize = 19;
 let bgOpacity = 0.72;
 let adjustLayoutHandler = null; // 统一保存布局回调，便于事件解绑
+let listDragState = null; // 记录字幕列表拖动中的指针偏移与 pointerId
+let userListPosition = null; // 用户拖动后的固定位置：{left, top}
 
 // ════════════════════════════════════════════════════════
 //  DOM
@@ -139,6 +143,47 @@ function setListHeight(mode) {
   listContainer.style.setProperty("--bilisub-list-max-height", `${Math.round(maxHeight)}px`);
 }
 
+function clampListPosition(left, top) {
+  if (!listContainer) return { left, top };
+
+  const rect = listContainer.getBoundingClientRect();
+  const padding = LIST_UI.dragEdgePadding;
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  const maxLeft = Math.max(padding, viewportWidth - rect.width - padding);
+  const maxTop = Math.max(padding, viewportHeight - rect.height - padding);
+
+  return {
+    left: Math.min(Math.max(left, padding), maxLeft),
+    top: Math.min(Math.max(top, padding), maxTop),
+  };
+}
+
+function applyListUserPosition() {
+  if (!listContainer || !userListPosition) return;
+
+  const next = clampListPosition(userListPosition.left, userListPosition.top);
+  userListPosition = next;
+  listContainer.style.left = `${Math.round(next.left)}px`;
+  listContainer.style.top = `${Math.round(next.top)}px`;
+  listContainer.style.right = "auto";
+  listContainer.style.bottom = "auto";
+}
+
+function switchListToUserPositioned() {
+  if (!listContainer) return;
+
+  if (!listContainer.isConnected || listContainer.parentElement !== document.body) {
+    document.body.appendChild(listContainer);
+  }
+
+  listContainer.style.flex = "";
+  listContainer.classList.add("fixed-fallback", "user-positioned");
+  listContainer.classList.remove("floating-mode", "sidebar-mode", "inline-mode");
+  setListHeight("floating");
+  applyListUserPosition();
+}
+
 function moveListContainer(targetParent, insertBefore = null) {
   if (!listContainer || !targetParent) return false;
   if (listContainer.parentElement === targetParent && (!insertBefore || listContainer.nextSibling === insertBefore)) {
@@ -157,6 +202,13 @@ function applyListContainerLayout() {
     (pc && pc.classList.contains("bpx-state-web-fs")) ||
     document.fullscreenElement !== null;
   const isWideScreen = pc && pc.getAttribute("data-screen") === "wide";
+
+  if (userListPosition) {
+    switchListToUserPositioned();
+    if (isWebFsOrFull) listContainer.classList.add("fullscreen-mode");
+    else listContainer.classList.remove("fullscreen-mode");
+    return;
+  }
 
   if (isWebFsOrFull) {
     if (!listContainer.isConnected || listContainer.parentElement !== document.body) {
@@ -201,6 +253,63 @@ function applyListContainerLayout() {
     "fullscreen-mode",
   );
   setListHeight("floating");
+}
+
+function bindListDrag(header) {
+  if (!listContainer || header.hasAttribute("data-drag-bound")) return;
+
+  header.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || e.target.closest("#bilisub-list-toggle")) return;
+
+    const rect = listContainer.getBoundingClientRect();
+    listDragState = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      rectLeft: rect.left,
+      rectTop: rect.top,
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+      active: false,
+    };
+
+    header.setPointerCapture?.(e.pointerId);
+  });
+
+  header.addEventListener("pointermove", (e) => {
+    if (!listDragState || e.pointerId !== listDragState.pointerId) return;
+
+    if (!listDragState.active) {
+      const moved = Math.hypot(e.clientX - listDragState.startX, e.clientY - listDragState.startY);
+      if (moved < LIST_UI.dragStartThreshold) return;
+
+      listDragState.active = true;
+      userListPosition = {
+        left: listDragState.rectLeft,
+        top: listDragState.rectTop,
+      };
+      switchListToUserPositioned();
+      listContainer.classList.add("dragging");
+    }
+
+    userListPosition = clampListPosition(
+      e.clientX - listDragState.offsetX,
+      e.clientY - listDragState.offsetY,
+    );
+    applyListUserPosition();
+    e.preventDefault();
+  });
+
+  const stopDragging = (e) => {
+    if (!listDragState || e.pointerId !== listDragState.pointerId) return;
+    listDragState = null;
+    listContainer?.classList.remove("dragging");
+    header.releasePointerCapture?.(e.pointerId);
+  };
+
+  header.addEventListener("pointerup", stopDragging);
+  header.addEventListener("pointercancel", stopDragging);
+  header.setAttribute("data-drag-bound", "true");
 }
 
 function updateSubtitleList() {
@@ -360,6 +469,8 @@ function removeOverlay() {
     listContainer.remove();
     listContainer = null;
   }
+  listDragState = null;
+  userListPosition = null;
   isActive = false;
   lastCueText = "";
   LOG("[DOM] 字幕层已移除");
@@ -390,6 +501,7 @@ function initSubtitleListContainer() {
   header.id = "bilisub-list-header";
   header.innerHTML = '<span id="bilisub-list-title">字幕列表</span><button id="bilisub-list-toggle" type="button">展开</button>';
   listContainer.appendChild(header);
+  bindListDrag(header);
 
   const content = document.createElement("div");
   content.id = "bilisub-list-content";
@@ -465,6 +577,13 @@ function initSubtitleListContainer() {
         z-index: 2147483646;
       }
 
+      #bilisub-list-container.user-positioned {
+        position: fixed;
+        margin: 0;
+        width: min(380px, calc(100vw - 16px));
+        z-index: 2147483646;
+      }
+
       #bilisub-list-header {
         display: flex;
         align-items: center;
@@ -472,6 +591,13 @@ function initSubtitleListContainer() {
         padding: 14px 16px;
         border-bottom: 1px solid rgba(148, 163, 184, 0.18);
         background: linear-gradient(90deg, rgba(248,250,252,0.9), rgba(241,245,249,0.72));
+        cursor: grab;
+        user-select: none;
+        touch-action: none;
+      }
+
+      #bilisub-list-container.dragging #bilisub-list-header {
+        cursor: grabbing;
       }
 
       #bilisub-list-container.floating-mode #bilisub-list-header,
