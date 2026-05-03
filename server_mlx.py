@@ -23,14 +23,11 @@ import logging
 import sys
 import tempfile
 import os
+import platform
 import threading
 import time
 
 import numpy as np
-import soundfile as sf
-import websockets
-from mlx_audio.stt import load as load_stt
-from mlx_audio.stt.utils import load as load_stt_utils
 
 import faulthandler
 
@@ -42,11 +39,21 @@ PORT = 8765
 SAMPLE_RATE = 16000
 LANGUAGE = "Chinese"
 
-QWEN3_ASR_ID = "mlx-community/Qwen3-ASR-1.7B-8bit"
-QWEN3_ALIGNER_ID = "mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
-VIBEVOICE_ID = "mlx-community/VibeVoice-ASR-bf16"  # 可填 HF 模型 ID 或本地目录
+MLX_QWEN3_ASR_ID = "mlx-community/Qwen3-ASR-1.7B-8bit"
+MLX_QWEN3_ALIGNER_ID = "mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
+MLX_VIBEVOICE_ID = "mlx-community/VibeVoice-ASR-bf16"
+TORCH_QWEN3_ASR_ID = "Qwen/Qwen3-ASR-1.7B"
+TORCH_QWEN3_ALIGNER_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
+TORCH_VIBEVOICE_ID = "microsoft/VibeVoice-ASR-HF"
+
+BACKEND = "auto"
+TORCH_DEVICE = "auto"
+QWEN3_ASR_ID = MLX_QWEN3_ASR_ID
+QWEN3_ALIGNER_ID = MLX_QWEN3_ALIGNER_ID
+VIBEVOICE_ID = MLX_VIBEVOICE_ID  # 可填 HF 模型 ID 或本地目录
 
 MAX_SEGMENT_SECONDS = 60.0
+websockets = None
 
 
 def _env_int(name: str, default: int) -> int:
@@ -60,37 +67,74 @@ def _env_int(name: str, default: int) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="B站实时字幕 MLX WebSocket ASR 后端")
+    parser = argparse.ArgumentParser(description="B站实时字幕 WebSocket ASR 后端")
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "mlx", "torch"),
+        default=os.environ.get("BILISUB_BACKEND", BACKEND),
+        help="ASR 后端：auto 在 macOS 使用 mlx，在 Windows/Linux 使用 torch",
+    )
     parser.add_argument("--host", default=os.environ.get("BILISUB_HOST", HOST))
     parser.add_argument("--port", type=int, default=_env_int("BILISUB_PORT", PORT))
     parser.add_argument("--language", default=os.environ.get("BILISUB_LANGUAGE", LANGUAGE))
     parser.add_argument(
+        "--torch-device",
+        default=os.environ.get("BILISUB_TORCH_DEVICE", TORCH_DEVICE),
+        help="Torch 后端设备，例如 auto、cuda:0 或 cpu",
+    )
+    parser.add_argument(
         "--qwen3-asr",
-        default=os.environ.get("BILISUB_QWEN3_ASR", QWEN3_ASR_ID),
+        default=os.environ.get("BILISUB_QWEN3_ASR"),
         help="Qwen3 ASR 模型 ID 或本地路径",
     )
     parser.add_argument(
         "--qwen3-aligner",
-        default=os.environ.get("BILISUB_QWEN3_ALIGNER", QWEN3_ALIGNER_ID),
+        default=os.environ.get("BILISUB_QWEN3_ALIGNER"),
         help="Qwen3 ForcedAligner 模型 ID 或本地路径",
     )
     parser.add_argument(
         "--vibevoice",
-        default=os.environ.get("BILISUB_VIBEVOICE", VIBEVOICE_ID),
+        default=os.environ.get("BILISUB_VIBEVOICE"),
         help="VibeVoice 模型 ID 或本地路径",
     )
     return parser.parse_args()
 
 
 def apply_config(args: argparse.Namespace) -> None:
-    global HOST, PORT, LANGUAGE, QWEN3_ASR_ID, QWEN3_ALIGNER_ID, VIBEVOICE_ID
+    global HOST, PORT, LANGUAGE, BACKEND, TORCH_DEVICE
+    global QWEN3_ASR_ID, QWEN3_ALIGNER_ID, VIBEVOICE_ID
 
     HOST = args.host
     PORT = args.port
     LANGUAGE = args.language
-    QWEN3_ASR_ID = args.qwen3_asr
-    QWEN3_ALIGNER_ID = args.qwen3_aligner
-    VIBEVOICE_ID = args.vibevoice
+    BACKEND = resolve_backend(args.backend)
+    TORCH_DEVICE = args.torch_device
+    defaults = get_backend_model_defaults(BACKEND)
+    QWEN3_ASR_ID = args.qwen3_asr or defaults["qwen3_asr"]
+    QWEN3_ALIGNER_ID = args.qwen3_aligner or defaults["qwen3_aligner"]
+    VIBEVOICE_ID = args.vibevoice or defaults["vibevoice"]
+
+
+def resolve_backend(requested: str) -> str:
+    if requested == "auto":
+        return "mlx" if platform.system() == "Darwin" else "torch"
+    if requested == "mlx" and platform.system() == "Windows":
+        raise RuntimeError("Windows 原生环境不支持 MLX，请使用 --backend torch")
+    return requested
+
+
+def get_backend_model_defaults(backend: str) -> dict:
+    if backend == "torch":
+        return {
+            "qwen3_asr": TORCH_QWEN3_ASR_ID,
+            "qwen3_aligner": TORCH_QWEN3_ALIGNER_ID,
+            "vibevoice": TORCH_VIBEVOICE_ID,
+        }
+    return {
+        "qwen3_asr": MLX_QWEN3_ASR_ID,
+        "qwen3_aligner": MLX_QWEN3_ALIGNER_ID,
+        "vibevoice": MLX_VIBEVOICE_ID,
+    }
 
 # ── 日志 ─────────────────────────────────────────────────
 logging.basicConfig(
@@ -116,19 +160,52 @@ inference_lock = threading.Lock()  # 推理串行化（mlx 不是线程安全的
 def _load_qwen3() -> None:
     """启动时加载默认 Qwen3 ASR 与对齐模型。"""
     log.info("=" * 60)
-    log.info("加载默认模型 Qwen3-ASR + Aligner...")
+    log.info(f"加载默认模型 Qwen3-ASR + Aligner... backend={BACKEND}")
     log.info(f"[模型] Qwen3 ASR: {QWEN3_ASR_ID}")
     log.info(f"[模型] Qwen3 Aligner: {QWEN3_ALIGNER_ID}")
     t0 = time.time()
     try:
-        MODEL_REGISTRY["qwen3"]["asr"] = load_stt(QWEN3_ASR_ID)
-        MODEL_REGISTRY["qwen3"]["aligner"] = load_stt(QWEN3_ALIGNER_ID)
+        if BACKEND == "mlx":
+            from mlx_audio.stt import load as load_stt
+
+            MODEL_REGISTRY["qwen3"]["asr"] = load_stt(QWEN3_ASR_ID)
+            MODEL_REGISTRY["qwen3"]["aligner"] = load_stt(QWEN3_ALIGNER_ID)
+        else:
+            from qwen_asr.inference.qwen3_asr import Qwen3ASRModel
+
+            torch_kwargs = _torch_model_kwargs()
+            MODEL_REGISTRY["qwen3"]["asr"] = Qwen3ASRModel.from_pretrained(
+                QWEN3_ASR_ID,
+                forced_aligner=QWEN3_ALIGNER_ID,
+                forced_aligner_kwargs=torch_kwargs,
+                max_inference_batch_size=1,
+                max_new_tokens=512,
+                **torch_kwargs,
+            )
         MODEL_REGISTRY["qwen3"]["loaded"] = True
         log.info(f"Qwen3 模型就绪 ✓ 耗时 {time.time() - t0:.1f}s")
     except Exception as e:
         log.error(f"Qwen3 加载失败: {e}", exc_info=True)
         raise
     log.info("=" * 60)
+
+
+def _torch_model_kwargs() -> dict:
+    import torch
+
+    if TORCH_DEVICE == "auto":
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    else:
+        device = TORCH_DEVICE
+
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        log.warning("[Torch] 指定了 CUDA 设备但当前未检测到 CUDA，将尝试按配置加载，可能失败")
+    if device == "cpu":
+        log.warning("[Torch] 未检测到 CUDA，使用 CPU 推理会非常慢，长视频体验不佳")
+
+    dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
+    log.info(f"[Torch] device_map={device}, dtype={dtype}")
+    return {"device_map": device, "dtype": dtype}
 
 
 # ════════════════════════════════════════════════════════
@@ -141,10 +218,26 @@ def _load_vibevoice() -> bool:
     with model_lock:
         if MODEL_REGISTRY["vibevoice"]["loaded"]:
             return True
-        log.info(f"[模型] 开始加载 VibeVoice: {VIBEVOICE_ID}")
+        log.info(f"[模型] 开始加载 VibeVoice: {VIBEVOICE_ID} backend={BACKEND}")
         t = time.time()
         try:
-            MODEL_REGISTRY["vibevoice"]["model"] = load_stt_utils(VIBEVOICE_ID)
+            if BACKEND == "mlx":
+                from mlx_audio.stt.utils import load as load_stt_utils
+
+                MODEL_REGISTRY["vibevoice"]["model"] = load_stt_utils(VIBEVOICE_ID)
+            else:
+                from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
+
+                torch_kwargs = _torch_model_kwargs()
+                processor = AutoProcessor.from_pretrained(VIBEVOICE_ID)
+                model = VibeVoiceAsrForConditionalGeneration.from_pretrained(
+                    VIBEVOICE_ID,
+                    **torch_kwargs,
+                )
+                MODEL_REGISTRY["vibevoice"]["model"] = {
+                    "processor": processor,
+                    "model": model,
+                }
             MODEL_REGISTRY["vibevoice"]["loaded"] = True
             log.info(f"[模型] VibeVoice 加载成功 ✓ 耗时 {time.time() - t:.1f}s")
             return True
@@ -167,6 +260,8 @@ def _pcm16_to_float32(raw: bytes) -> np.ndarray:
 
 
 def _write_temp_wav(audio: np.ndarray, sr: int) -> str:
+    import soundfile as sf
+
     fd, path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     sf.write(path, audio, sr, subtype="PCM_16")
@@ -275,6 +370,47 @@ def _infer_qwen3(
     )
     tmp_path = _write_temp_wav(audio, SAMPLE_RATE)
     try:
+        if BACKEND == "torch":
+            t = time.time()
+            results = asr_model.transcribe(
+                audio=tmp_path,
+                language=LANGUAGE,
+                return_time_stamps=True,
+            )
+            result = results[0] if results else None
+            text = str(getattr(result, "text", "")).strip() if result else ""
+            log.info(f"[Qwen3][Torch] {time.time() - t:.2f}s → 「{text[:100]}」")
+            if not text:
+                return chunk_id, []
+
+            timestamps = getattr(result, "time_stamps", None)
+            raw_words = []
+            for item in list(timestamps or []):
+                w = str(getattr(item, "text", "")).strip()
+                if w:
+                    raw_words.append(
+                        {
+                            "word": w,
+                            "start": float(getattr(item, "start_time", 0)),
+                            "end": float(getattr(item, "end_time", 0)),
+                        }
+                    )
+
+            if raw_words:
+                sentences = _split_text_to_sentences(text)
+                out = _align_sentences_to_words(sentences, raw_words, time_offset)
+            else:
+                log.warning("[Qwen3][Torch] 无时间戳，使用整块时长兜底")
+                out = [
+                    {
+                        "text": text,
+                        "start": time_offset,
+                        "end": round(time_offset + len(audio) / SAMPLE_RATE, 3),
+                    }
+                ]
+            log.info(f"[Qwen3][Torch] chunk_id={chunk_id} 完成 | {len(out)} 句")
+            return chunk_id, out
+
         # ASR
         t = time.time()
         result = asr_model.generate(tmp_path, language=LANGUAGE, max_tokens=512)
@@ -333,6 +469,55 @@ def _infer_vibevoice(
     )
     tmp_path = _write_temp_wav(audio, SAMPLE_RATE)
     try:
+        if BACKEND == "torch":
+            import torch
+
+            processor = model["processor"]
+            vv_model = model["model"]
+            t = time.time()
+            inputs = processor.apply_transcription_request(audio=tmp_path).to(
+                vv_model.device,
+                vv_model.dtype,
+            )
+            with torch.no_grad():
+                output_ids = vv_model.generate(**inputs)
+            generated_ids = output_ids[:, inputs["input_ids"].shape[1] :]
+            parsed = processor.decode(generated_ids, return_format="parsed")[0]
+            log.info(
+                f"[VibeVoice][Torch] 推理完成 {time.time() - t:.2f}s | parsed={isinstance(parsed, list)}"
+            )
+
+            sentences = []
+            if isinstance(parsed, list):
+                for seg in parsed:
+                    text = str(seg.get("Content", "") or seg.get("text", "")).strip()
+                    if not text:
+                        continue
+                    start = float(seg.get("Start", seg.get("start", 0)))
+                    end = float(seg.get("End", seg.get("end", start)))
+                    sentences.append(
+                        {
+                            "text": text,
+                            "start": round(start + time_offset, 3),
+                            "end": round(end + time_offset, 3),
+                        }
+                    )
+            else:
+                text = str(
+                    processor.decode(generated_ids, return_format="transcription_only")[0]
+                ).strip()
+                if text:
+                    sentences.append(
+                        {
+                            "text": text,
+                            "start": time_offset,
+                            "end": round(time_offset + len(audio) / SAMPLE_RATE, 3),
+                        }
+                    )
+
+            log.info(f"[VibeVoice][Torch] chunk_id={chunk_id} 完成 | {len(sentences)} 句")
+            return chunk_id, sentences
+
         t = time.time()
         result = model.generate(audio=tmp_path, max_tokens=8192, temperature=0.0)
         log.info(
@@ -388,7 +573,7 @@ def transcribe(
     if len(audio) < SAMPLE_RATE * 0.3:
         log.warning(f"[推理] 音频过短 ({len(audio) / SAMPLE_RATE:.2f}s)，跳过")
         return chunk_id, []
-    if len(audio) > SAMPLE_RATE * MAX_SEGMENT_SECONDS:
+    if active_model != "vibevoice" and len(audio) > SAMPLE_RATE * MAX_SEGMENT_SECONDS:
         log.warning(f"[推理] 音频截断至 {MAX_SEGMENT_SECONDS}s")
         audio = audio[: int(SAMPLE_RATE * MAX_SEGMENT_SECONDS)]
 
@@ -562,12 +747,17 @@ async def handle_client(websocket):
 # ════════════════════════════════════════════════════════
 
 
-async def main():
-    args = parse_args()
+async def main(args: argparse.Namespace):
+    global websockets
+
     apply_config(args)
+    import websockets as websockets_module
+
+    websockets = websockets_module
     _load_qwen3()
 
     log.info(f"启动 WebSocket 服务: ws://{HOST}:{PORT}")
+    log.info(f"ASR 后端: {BACKEND}")
     log.info(f"默认模型: {active_model}")
     log.info(f"VibeVoice 模型: {VIBEVOICE_ID}")
     log.info("等待插件连接... (Ctrl+C 停止)")
@@ -585,7 +775,8 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        cli_args = parse_args()
+        asyncio.run(main(cli_args))
     except KeyboardInterrupt:
         log.info("服务已停止")
         sys.exit(0)
