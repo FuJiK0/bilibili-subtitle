@@ -41,8 +41,14 @@ async function getVideoInfo(bvid) {
   return data.data;   // .cid, .title, .duration, ...
 }
 
-/** bvid + cid → 最高码率的纯音频流 URL */
-async function getAudioStreamUrl(bvid, cid) {
+function collectAudioUrls(audio) {
+  // B站同一音频流通常会返回主地址和多个备用 CDN 地址，任一节点都可能临时 403。
+  return [audio.baseUrl, audio.base_url, ...(audio.backupUrl ?? []), ...(audio.backup_url ?? [])]
+    .filter(Boolean);
+}
+
+/** bvid + cid → 按码率优先级排列的纯音频流 URL 候选列表 */
+async function getAudioStreamUrls(bvid, cid) {
   LOG(`[API] 获取 DASH 播放地址: bvid=${bvid}, cid=${cid}`);
   const res = await fetch(
     `https://api.bilibili.com/x/player/playurl?bvid=${bvid}&cid=${cid}&fnval=16`,
@@ -56,14 +62,14 @@ async function getAudioStreamUrl(bvid, cid) {
   const audios = data.data?.dash?.audio;
   if (!audios || audios.length === 0) throw new Error('未找到音频流（可能需要登录或视频无音频）');
 
-  // 按码率降序选最高质量
+  // 按码率降序优先使用高质量音频，但保留低码率与 backup CDN 作为 403 兜底。
   audios.sort((a, b) => b.bandwidth - a.bandwidth);
   const best = audios[0];
-  const url  = best.baseUrl || best.base_url || best.backupUrl?.[0];
-  if (!url) throw new Error('音频流 URL 为空');
+  const urls = [...new Set(audios.flatMap(collectAudioUrls))];
+  if (urls.length === 0) throw new Error('音频流 URL 为空');
 
-  LOG(`[API] 选择音频流: codec=${best.codecs ?? '?'} bandwidth=${best.bandwidth} url前80字符=${url.slice(0, 80)}`);
-  return url;
+  LOG(`[API] 选择音频流: codec=${best.codecs ?? '?'} bandwidth=${best.bandwidth} 候选URL=${urls.length} 首个前80字符=${urls[0].slice(0, 80)}`);
+  return urls;
 }
 
 // ════════════════════════════════════════════════════════
@@ -100,8 +106,8 @@ async function startProcessing(bvid, tabId, model = 'qwen3') {
 
   try {
     // 1. 获取视频信息
-    const info     = await getVideoInfo(bvid);
-    const audioUrl = await getAudioStreamUrl(bvid, info.cid);
+    const info      = await getVideoInfo(bvid);
+    const audioUrls = await getAudioStreamUrls(bvid, info.cid);
 
     notifyTab({ type: 'STATUS', status: 'processing', message: '下载并解码音频中...' });
     notifyPopup({ type: 'PROCESSING_START', title: info.title });
@@ -113,7 +119,7 @@ async function startProcessing(bvid, tabId, model = 'qwen3') {
     chrome.runtime.sendMessage({
       _to:         'offscreen',
       type:        'PROCESS_AUDIO',
-      audioUrl,
+      audioUrls,
       model:       model,
       totalChunks: TOTAL_CHUNKS,
     });

@@ -165,16 +165,28 @@ function waitForModelSwitch() {
 //  音频下载 & 解码
 // ════════════════════════════════════════════════════════
 
-async function fetchAudio(url) {
-  LOG(`[Audio] 开始下载: ${url.slice(0, 80)}...`);
+const BILIBILI_REFERRER = 'https://www.bilibili.com/';
+
+function normalizeAudioUrls(urlOrUrls) {
+  // 兼容旧消息格式 audioUrl，同时让新格式 audioUrls 可以携带多个 CDN 兜底地址。
+  const urls = Array.isArray(urlOrUrls) ? urlOrUrls : [urlOrUrls];
+  return [...new Set(urls.filter(Boolean))];
+}
+
+function getAudioRequestInit() {
+  return {
+    credentials: 'include',
+    cache: 'no-store',
+    referrer: BILIBILI_REFERRER,
+    referrerPolicy: 'strict-origin-when-cross-origin',
+  };
+}
+
+async function fetchAudioFromUrl(url, index, total) {
+  LOG(`[Audio] 开始下载候选 ${index + 1}/${total}: ${url.slice(0, 80)}...`);
   const t0 = performance.now();
 
-  const res = await fetch(url, {
-    headers: {
-      'Referer': 'https://www.bilibili.com',
-      'Origin':  'https://www.bilibili.com',
-    },
-  });
+  const res = await fetch(url, getAudioRequestInit());
 
   if (!res.ok) throw new Error(`音频下载失败 HTTP ${res.status}`);
 
@@ -184,6 +196,23 @@ async function fetchAudio(url) {
   const buf = await res.arrayBuffer();
   LOG(`[Audio] 下载完成: ${(buf.byteLength/1024/1024).toFixed(1)}MB，耗时 ${((performance.now()-t0)/1000).toFixed(1)}s`);
   return buf;
+}
+
+async function fetchAudio(urlOrUrls) {
+  const urls = normalizeAudioUrls(urlOrUrls);
+  if (urls.length === 0) throw new Error('音频下载失败：音频 URL 为空');
+
+  const errors = [];
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      return await fetchAudioFromUrl(urls[i], i, urls.length);
+    } catch (err) {
+      errors.push(`${i + 1}/${urls.length} ${err.message}`);
+      ERR(`[Audio] 候选 ${i + 1}/${urls.length} 下载失败: ${err.message}`);
+    }
+  }
+
+  throw new Error(`音频下载失败：所有 ${urls.length} 个候选地址均不可用（${errors.join('；')}）。请刷新页面后重试，或确认当前视频可正常播放/账号有权限访问。`);
 }
 
 async function decodeAndResample(arrayBuffer) {
@@ -304,7 +333,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       ws.send(modelMsg);
       await modelSwitchPromise;
 
-      const buf = await fetchAudio(msg.audioUrl);
+      const buf = await fetchAudio(msg.audioUrls ?? msg.audioUrl);
       const { samples, duration } = await decodeAndResample(buf);
       if (sessionId !== currentSessionId) return;
 
