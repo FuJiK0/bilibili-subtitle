@@ -17,6 +17,7 @@ server_mlx.py — 双模型 WebSocket ASR 后端
 """
 
 import asyncio
+import argparse
 import json
 import logging
 import sys
@@ -41,11 +42,55 @@ PORT = 8765
 SAMPLE_RATE = 16000
 LANGUAGE = "Chinese"
 
-QWEN3_ASR_ID = "/Users/wjh/.omlx/models/Qwen3-ASR-1.7B-8bit"
-QWEN3_ALIGNER_ID = "/Users/wjh/.omlx/models/Qwen3-ForcedAligner-0.6B-8bit"
-VIBEVOICE_ID = "mlx-community/VibeVoice-ASR-bf16"  # 自动从 HF 下载
+QWEN3_ASR_ID = "mlx-community/Qwen3-ASR-1.7B-8bit"
+QWEN3_ALIGNER_ID = "mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
+VIBEVOICE_ID = "mlx-community/VibeVoice-ASR-bf16"  # 可填 HF 模型 ID 或本地目录
 
 MAX_SEGMENT_SECONDS = 60.0
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(f"环境变量 {name} 必须是整数，当前值: {value}") from None
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="B站实时字幕 MLX WebSocket ASR 后端")
+    parser.add_argument("--host", default=os.environ.get("BILISUB_HOST", HOST))
+    parser.add_argument("--port", type=int, default=_env_int("BILISUB_PORT", PORT))
+    parser.add_argument("--language", default=os.environ.get("BILISUB_LANGUAGE", LANGUAGE))
+    parser.add_argument(
+        "--qwen3-asr",
+        default=os.environ.get("BILISUB_QWEN3_ASR", QWEN3_ASR_ID),
+        help="Qwen3 ASR 模型 ID 或本地路径",
+    )
+    parser.add_argument(
+        "--qwen3-aligner",
+        default=os.environ.get("BILISUB_QWEN3_ALIGNER", QWEN3_ALIGNER_ID),
+        help="Qwen3 ForcedAligner 模型 ID 或本地路径",
+    )
+    parser.add_argument(
+        "--vibevoice",
+        default=os.environ.get("BILISUB_VIBEVOICE", VIBEVOICE_ID),
+        help="VibeVoice 模型 ID 或本地路径",
+    )
+    return parser.parse_args()
+
+
+def apply_config(args: argparse.Namespace) -> None:
+    global HOST, PORT, LANGUAGE, QWEN3_ASR_ID, QWEN3_ALIGNER_ID, VIBEVOICE_ID
+
+    HOST = args.host
+    PORT = args.port
+    LANGUAGE = args.language
+    QWEN3_ASR_ID = args.qwen3_asr
+    QWEN3_ALIGNER_ID = args.qwen3_aligner
+    VIBEVOICE_ID = args.vibevoice
 
 # ── 日志 ─────────────────────────────────────────────────
 logging.basicConfig(
@@ -67,19 +112,23 @@ active_model = "qwen3"  # 当前使用的模型
 model_lock = threading.Lock()  # 模型切换保护
 inference_lock = threading.Lock()  # 推理串行化（mlx 不是线程安全的）
 
-# ── 启动时加载 Qwen3（默认模型） ─────────────────────────
-log.info("=" * 60)
-log.info("加载默认模型 Qwen3-ASR + Aligner...")
-t0 = time.time()
-try:
-    MODEL_REGISTRY["qwen3"]["asr"] = load_stt(QWEN3_ASR_ID)
-    MODEL_REGISTRY["qwen3"]["aligner"] = load_stt(QWEN3_ALIGNER_ID)
-    MODEL_REGISTRY["qwen3"]["loaded"] = True
-    log.info(f"Qwen3 模型就绪 ✓ 耗时 {time.time() - t0:.1f}s")
-except Exception as e:
-    log.error(f"Qwen3 加载失败: {e}", exc_info=True)
-    raise
-log.info("=" * 60)
+
+def _load_qwen3() -> None:
+    """启动时加载默认 Qwen3 ASR 与对齐模型。"""
+    log.info("=" * 60)
+    log.info("加载默认模型 Qwen3-ASR + Aligner...")
+    log.info(f"[模型] Qwen3 ASR: {QWEN3_ASR_ID}")
+    log.info(f"[模型] Qwen3 Aligner: {QWEN3_ALIGNER_ID}")
+    t0 = time.time()
+    try:
+        MODEL_REGISTRY["qwen3"]["asr"] = load_stt(QWEN3_ASR_ID)
+        MODEL_REGISTRY["qwen3"]["aligner"] = load_stt(QWEN3_ALIGNER_ID)
+        MODEL_REGISTRY["qwen3"]["loaded"] = True
+        log.info(f"Qwen3 模型就绪 ✓ 耗时 {time.time() - t0:.1f}s")
+    except Exception as e:
+        log.error(f"Qwen3 加载失败: {e}", exc_info=True)
+        raise
+    log.info("=" * 60)
 
 
 # ════════════════════════════════════════════════════════
@@ -514,8 +563,13 @@ async def handle_client(websocket):
 
 
 async def main():
+    args = parse_args()
+    apply_config(args)
+    _load_qwen3()
+
     log.info(f"启动 WebSocket 服务: ws://{HOST}:{PORT}")
     log.info(f"默认模型: {active_model}")
+    log.info(f"VibeVoice 模型: {VIBEVOICE_ID}")
     log.info("等待插件连接... (Ctrl+C 停止)")
 
     async with websockets.serve(
