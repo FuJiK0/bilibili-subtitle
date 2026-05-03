@@ -8,7 +8,7 @@
 - 支持字幕列表，点击句子可跳转到对应时间。
 - 字幕列表支持拖动，用户可以移动到合适位置。
 - 支持两种后端模型：
-  - `qwen3`：Qwen3-ASR + ForcedAligner，默认模型，按音频块处理。
+  - `qwen3`：Qwen3-ASR + ForcedAligner，默认模型，按音频块处理。（推荐）
   - `vibevoice`：VibeVoice-ASR，自带句级时间戳，首次使用时懒加载。
 
 ## 环境要求
