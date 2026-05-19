@@ -76,7 +76,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--host", default=os.environ.get("BILISUB_HOST", HOST))
     parser.add_argument("--port", type=int, default=_env_int("BILISUB_PORT", PORT))
-    parser.add_argument("--language", default=os.environ.get("BILISUB_LANGUAGE", LANGUAGE))
+    parser.add_argument(
+        "--language", default=os.environ.get("BILISUB_LANGUAGE", LANGUAGE)
+    )
     parser.add_argument(
         "--torch-device",
         default=os.environ.get("BILISUB_TORCH_DEVICE", TORCH_DEVICE),
@@ -135,6 +137,7 @@ def get_backend_model_defaults(backend: str) -> dict:
         "qwen3_aligner": MLX_QWEN3_ALIGNER_ID,
         "vibevoice": MLX_VIBEVOICE_ID,
     }
+
 
 # ── 日志 ─────────────────────────────────────────────────
 logging.basicConfig(
@@ -199,7 +202,9 @@ def _torch_model_kwargs() -> dict:
         device = TORCH_DEVICE
 
     if device.startswith("cuda") and not torch.cuda.is_available():
-        log.warning("[Torch] 指定了 CUDA 设备但当前未检测到 CUDA，将尝试按配置加载，可能失败")
+        log.warning(
+            "[Torch] 指定了 CUDA 设备但当前未检测到 CUDA，将尝试按配置加载，可能失败"
+        )
     if device == "cpu":
         log.warning("[Torch] 未检测到 CUDA，使用 CPU 推理会非常慢，长视频体验不佳")
 
@@ -226,7 +231,10 @@ def _load_vibevoice() -> bool:
 
                 MODEL_REGISTRY["vibevoice"]["model"] = load_stt_utils(VIBEVOICE_ID)
             else:
-                from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
+                from transformers import (
+                    AutoProcessor,
+                    VibeVoiceAsrForConditionalGeneration,
+                )
 
                 torch_kwargs = _torch_model_kwargs()
                 processor = AutoProcessor.from_pretrained(VIBEVOICE_ID)
@@ -275,7 +283,15 @@ MIN_SENT_CHARS = 5
 
 
 def _strip_punct(s: str) -> str:
-    return "".join(c for c in s if c.isalnum() or "\u4e00" <= c <= "\u9fff")
+    """
+    去除字符串中的标点符号，仅保留字母、数字和中文字符。
+    用于计算句子的“净字符数”。
+    """
+    return "".join(
+        c for c in s 
+        if c.isalnum()                   # 字母或数字
+        or "\u4e00" <= c <= "\u9fff"     # 中文字符（基本汉字范围）
+    )
 
 
 def _split_text_to_sentences(text: str) -> list[str]:
@@ -504,7 +520,9 @@ def _infer_vibevoice(
                     )
             else:
                 text = str(
-                    processor.decode(generated_ids, return_format="transcription_only")[0]
+                    processor.decode(generated_ids, return_format="transcription_only")[
+                        0
+                    ]
                 ).strip()
                 if text:
                     sentences.append(
@@ -515,7 +533,9 @@ def _infer_vibevoice(
                         }
                     )
 
-            log.info(f"[VibeVoice][Torch] chunk_id={chunk_id} 完成 | {len(sentences)} 句")
+            log.info(
+                f"[VibeVoice][Torch] chunk_id={chunk_id} 完成 | {len(sentences)} 句"
+            )
             return chunk_id, sentences
 
         t = time.time()
