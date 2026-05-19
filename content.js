@@ -119,28 +119,41 @@ function setListHeight(mode) {
     document.querySelector(".bpx-player-video-wrap")?.getBoundingClientRect() ||
     document.querySelector(".bilibili-player-video")?.getBoundingClientRect();
 
-  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  const viewportHeight =
+    window.innerHeight || document.documentElement.clientHeight;
   const playerHeight = playerRect?.height ?? 0;
 
   let maxHeight = LIST_UI.normalMaxHeight;
   if (mode === "wide") {
     maxHeight = Math.max(
       LIST_UI.normalMaxHeight,
-      Math.min(viewportHeight * LIST_UI.sideViewportRatio, playerHeight || Infinity),
+      Math.min(
+        viewportHeight * LIST_UI.sideViewportRatio,
+        playerHeight || Infinity,
+      ),
     );
   } else if (mode === "floating") {
     maxHeight = Math.max(
       LIST_UI.floatingMinHeight,
-      Math.min(viewportHeight * LIST_UI.floatingViewportRatio, playerHeight * 0.72 || Infinity),
+      Math.min(
+        viewportHeight * LIST_UI.floatingViewportRatio,
+        playerHeight * 0.72 || Infinity,
+      ),
     );
   } else {
     maxHeight = Math.max(
       240,
-      Math.min(viewportHeight * LIST_UI.normalViewportRatio, LIST_UI.normalMaxHeight),
+      Math.min(
+        viewportHeight * LIST_UI.normalViewportRatio,
+        LIST_UI.normalMaxHeight,
+      ),
     );
   }
 
-  listContainer.style.setProperty("--bilisub-list-max-height", `${Math.round(maxHeight)}px`);
+  listContainer.style.setProperty(
+    "--bilisub-list-max-height",
+    `${Math.round(maxHeight)}px`,
+  );
 }
 
 function clampListPosition(left, top) {
@@ -148,8 +161,10 @@ function clampListPosition(left, top) {
 
   const rect = listContainer.getBoundingClientRect();
   const padding = LIST_UI.dragEdgePadding;
-  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  const viewportWidth =
+    window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight =
+    window.innerHeight || document.documentElement.clientHeight;
   const maxLeft = Math.max(padding, viewportWidth - rect.width - padding);
   const maxTop = Math.max(padding, viewportHeight - rect.height - padding);
 
@@ -173,20 +188,30 @@ function applyListUserPosition() {
 function switchListToUserPositioned() {
   if (!listContainer) return;
 
-  if (!listContainer.isConnected || listContainer.parentElement !== document.body) {
+  if (
+    !listContainer.isConnected ||
+    listContainer.parentElement !== document.body
+  ) {
     document.body.appendChild(listContainer);
   }
 
   listContainer.style.flex = "";
   listContainer.classList.add("fixed-fallback", "user-positioned");
-  listContainer.classList.remove("floating-mode", "sidebar-mode", "inline-mode");
+  listContainer.classList.remove(
+    "floating-mode",
+    "sidebar-mode",
+    "inline-mode",
+  );
   setListHeight("floating");
   applyListUserPosition();
 }
 
 function moveListContainer(targetParent, insertBefore = null) {
   if (!listContainer || !targetParent) return false;
-  if (listContainer.parentElement === targetParent && (!insertBefore || listContainer.nextSibling === insertBefore)) {
+  if (
+    listContainer.parentElement === targetParent &&
+    (!insertBefore || listContainer.nextSibling === insertBefore)
+  ) {
     return false;
   }
 
@@ -211,11 +236,18 @@ function applyListContainerLayout() {
   }
 
   if (isWebFsOrFull) {
-    if (!listContainer.isConnected || listContainer.parentElement !== document.body) {
+    if (
+      !listContainer.isConnected ||
+      listContainer.parentElement !== document.body
+    ) {
       document.body.appendChild(listContainer);
     }
     listContainer.classList.add("fixed-fallback", "fullscreen-mode");
-    listContainer.classList.remove("floating-mode", "sidebar-mode", "inline-mode");
+    listContainer.classList.remove(
+      "floating-mode",
+      "sidebar-mode",
+      "inline-mode",
+    );
     setListHeight("floating");
     return;
   }
@@ -242,7 +274,10 @@ function applyListContainerLayout() {
     }
   }
 
-  if (!listContainer.isConnected || listContainer.parentElement !== document.body) {
+  if (
+    !listContainer.isConnected ||
+    listContainer.parentElement !== document.body
+  ) {
     document.body.appendChild(listContainer);
   }
   listContainer.classList.add("fixed-fallback");
@@ -280,7 +315,10 @@ function bindListDrag(header) {
     if (!listDragState || e.pointerId !== listDragState.pointerId) return;
 
     if (!listDragState.active) {
-      const moved = Math.hypot(e.clientX - listDragState.startX, e.clientY - listDragState.startY);
+      const moved = Math.hypot(
+        e.clientX - listDragState.startX,
+        e.clientY - listDragState.startY,
+      );
       if (moved < LIST_UI.dragStartThreshold) return;
 
       listDragState.active = true;
@@ -319,7 +357,9 @@ function updateSubtitleList() {
 
   if (!contentNode.hasAttribute("data-scroll-bound")) {
     // 这里只做滚动状态标记，不阻止默认行为，使用 passive 监听避免滚动性能警告。
-    contentNode.addEventListener("wheel", markListInteracting, { passive: true });
+    contentNode.addEventListener("wheel", markListInteracting, {
+      passive: true,
+    });
     contentNode.addEventListener("touchstart", markListInteracting, {
       passive: true,
     });
@@ -499,7 +539,8 @@ function initSubtitleListContainer() {
 
   const header = document.createElement("div");
   header.id = "bilisub-list-header";
-  header.innerHTML = '<span id="bilisub-list-title">字幕列表</span><button id="bilisub-list-toggle" type="button">展开</button>';
+  header.innerHTML =
+    '<span id="bilisub-list-title">字幕列表</span><button id="bilisub-list-toggle" type="button">展开</button>';
   listContainer.appendChild(header);
   bindListDrag(header);
 

@@ -1,257 +1,414 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <title>B站实时字幕</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+  <head>
+    <meta charset="UTF-8" />
+    <title>B站实时字幕</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
 
-    body {
-      width: 300px;
-      background: #0f0f13;
-      color: #e8e8e8;
-      font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
-      font-size: 13px;
-    }
+      body {
+        width: 300px;
+        background: #0f0f13;
+        color: #e8e8e8;
+        font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+        font-size: 13px;
+      }
 
-    /* ── 头部 ── */
-    .header {
-      display: flex; align-items: center; gap: 10px;
-      padding: 14px 16px 12px;
-      border-bottom: 1px solid rgba(255,255,255,0.07);
-    }
-    .header-logo {
-      width: 28px; height: 28px;
-      background: linear-gradient(135deg, #00AEEC 0%, #0078C8 100%);
-      border-radius: 8px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 15px; flex-shrink: 0;
-    }
-    .header-title { font-size: 15px; font-weight: 600; color: #fff; }
-    .header-sub   { font-size: 11px; color: rgba(255,255,255,0.35); margin-top: 1px; }
+      /* ── 头部 ── */
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 16px 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      }
+      .header-logo {
+        width: 28px;
+        height: 28px;
+        background: linear-gradient(135deg, #00aeec 0%, #0078c8 100%);
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 15px;
+        flex-shrink: 0;
+      }
+      .header-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: #fff;
+      }
+      .header-sub {
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.35);
+        margin-top: 1px;
+      }
 
-    /* ── WS 状态 ── */
-    .ws-indicator {
-      display: flex; align-items: center; gap: 8px;
-      padding: 7px 12px;
-      border-radius: 7px;
-      background: rgba(255,255,255,0.05);
-      margin: 12px 16px 0;
-    }
-    .ws-dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: #555; flex-shrink: 0;
-    }
-    .ws-dot.connected  { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
-    .ws-dot.error      { background: #ef4444; }
-    .ws-dot.connecting { background: #f59e0b; animation: blink 1s infinite; }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.4} }
-    .ws-label { font-size: 12px; color: rgba(255,255,255,0.6); }
+      /* ── WS 状态 ── */
+      .ws-indicator {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 12px;
+        border-radius: 7px;
+        background: rgba(255, 255, 255, 0.05);
+        margin: 12px 16px 0;
+      }
+      .ws-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #555;
+        flex-shrink: 0;
+      }
+      .ws-dot.connected {
+        background: #22c55e;
+        box-shadow: 0 0 6px #22c55e88;
+      }
+      .ws-dot.error {
+        background: #ef4444;
+      }
+      .ws-dot.connecting {
+        background: #f59e0b;
+        animation: blink 1s infinite;
+      }
+      @keyframes blink {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+      .ws-label {
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.6);
+      }
 
-    /* ── URL 输入区 ── */
-    .input-section { padding: 14px 16px 0; }
+      /* ── URL 输入区 ── */
+      .input-section {
+        padding: 14px 16px 0;
+      }
 
-    .input-row {
-      display: flex; gap: 8px;
-    }
-    #url-input {
-      flex: 1;
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 7px;
-      padding: 8px 10px;
-      color: #e8e8e8;
-      font-size: 12px;
-      outline: none;
-      transition: border-color 0.15s;
-    }
-    #url-input::placeholder { color: rgba(255,255,255,0.3); }
-    #url-input:focus { border-color: rgba(0,174,236,0.5); }
+      .input-row {
+        display: flex;
+        gap: 8px;
+      }
+      #url-input {
+        flex: 1;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 7px;
+        padding: 8px 10px;
+        color: #e8e8e8;
+        font-size: 12px;
+        outline: none;
+        transition: border-color 0.15s;
+      }
+      #url-input::placeholder {
+        color: rgba(255, 255, 255, 0.3);
+      }
+      #url-input:focus {
+        border-color: rgba(0, 174, 236, 0.5);
+      }
 
-    #btn-generate {
-      padding: 8px 14px;
-      background: linear-gradient(135deg, #00AEEC 0%, #0078C8 100%);
-      border: none; border-radius: 7px;
-      color: #fff; font-size: 12px; font-weight: 600;
-      cursor: pointer; white-space: nowrap;
-      transition: opacity 0.15s, transform 0.1s;
-    }
-    #btn-generate:active  { transform: scale(0.96); }
-    #btn-generate:disabled { opacity: 0.4; cursor: not-allowed; }
+      #btn-generate {
+        padding: 8px 14px;
+        background: linear-gradient(135deg, #00aeec 0%, #0078c8 100%);
+        border: none;
+        border-radius: 7px;
+        color: #fff;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+        transition:
+          opacity 0.15s,
+          transform 0.1s;
+      }
+      #btn-generate:active {
+        transform: scale(0.96);
+      }
+      #btn-generate:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
 
-    /* ── 进度区 ── */
-    .progress-section {
-      padding: 12px 16px 0;
-      display: none;
-    }
-    .progress-section.visible { display: block; }
+      /* ── 进度区 ── */
+      .progress-section {
+        padding: 12px 16px 0;
+        display: none;
+      }
+      .progress-section.visible {
+        display: block;
+      }
 
-    .progress-bar-wrap {
-      background: rgba(255,255,255,0.08);
-      border-radius: 4px; height: 5px; overflow: hidden;
-    }
-    .progress-bar {
-      height: 100%;
-      background: linear-gradient(90deg, #00AEEC, #0078C8);
-      border-radius: 4px;
-      transition: width 0.4s ease;
-      width: 0%;
-    }
-    .progress-label {
-      display: flex; justify-content: space-between;
-      margin-top: 5px;
-      font-size: 11px; color: rgba(255,255,255,0.45);
-    }
+      .progress-bar-wrap {
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 4px;
+        height: 5px;
+        overflow: hidden;
+      }
+      .progress-bar {
+        height: 100%;
+        background: linear-gradient(90deg, #00aeec, #0078c8);
+        border-radius: 4px;
+        transition: width 0.4s ease;
+        width: 0%;
+      }
+      .progress-label {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 5px;
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.45);
+      }
 
-    /* ── 状态文字 ── */
-    .status-text {
-      margin: 10px 16px 0;
-      font-size: 11px;
-      color: rgba(255,255,255,0.4);
-      text-align: center;
-      min-height: 16px;
-    }
-    .status-text.error { color: #ef4444; }
-    .status-text.done  { color: #22c55e; }
+      /* ── 状态文字 ── */
+      .status-text {
+        margin: 10px 16px 0;
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.4);
+        text-align: center;
+        min-height: 16px;
+      }
+      .status-text.error {
+        color: #ef4444;
+      }
+      .status-text.done {
+        color: #22c55e;
+      }
 
-    /* ── 停止按钮 ── */
-    #btn-stop {
-      display: none;
-      width: calc(100% - 32px);
-      margin: 10px 16px 0;
-      height: 34px;
-      border: 1px solid rgba(239,68,68,0.4);
-      border-radius: 7px;
-      background: transparent;
-      color: #ef4444;
-      font-size: 12px;
-      cursor: pointer;
-      transition: background 0.15s;
-    }
-    #btn-stop:hover { background: rgba(239,68,68,0.1); }
-    #btn-stop.visible { display: block; }
+      /* ── 停止按钮 ── */
+      #btn-stop {
+        display: none;
+        width: calc(100% - 32px);
+        margin: 10px 16px 0;
+        height: 34px;
+        border: 1px solid rgba(239, 68, 68, 0.4);
+        border-radius: 7px;
+        background: transparent;
+        color: #ef4444;
+        font-size: 12px;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      #btn-stop:hover {
+        background: rgba(239, 68, 68, 0.1);
+      }
+      #btn-stop.visible {
+        display: block;
+      }
 
-    /* ── 分割线 ── */
-    .divider {
-      height: 1px;
-      background: rgba(255,255,255,0.06);
-      margin: 14px 0 0;
-    }
+      /* ── 分割线 ── */
+      .divider {
+        height: 1px;
+        background: rgba(255, 255, 255, 0.06);
+        margin: 14px 0 0;
+      }
 
-    /* ── 设置区 ── */
-    .settings-section { padding: 10px 16px 14px; }
-    .settings-title {
-      font-size: 11px; color: rgba(255,255,255,0.3);
-      text-transform: uppercase; letter-spacing: 0.08em;
-      margin-bottom: 10px;
-    }
-    .setting-row {
-      display: flex; align-items: center;
-      justify-content: space-between;
-      margin-bottom: 9px;
-    }
-    .setting-label { font-size: 12px; color: rgba(255,255,255,0.55); }
+      /* ── 设置区 ── */
+      .settings-section {
+        padding: 10px 16px 14px;
+      }
+      .settings-title {
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.3);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 10px;
+      }
+      .setting-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 9px;
+      }
+      .setting-label {
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.55);
+      }
 
-    input[type="range"] {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 100px; height: 3px;
-      border-radius: 2px;
-      background: rgba(255,255,255,0.15);
-      outline: none;
-    }
-    input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 13px; height: 13px; border-radius: 50%;
-      background: #00AEEC; cursor: pointer;
-    }
-    .setting-value { font-size: 12px; color: #00AEEC; min-width: 32px; text-align: right; }
-  .model-tab:hover { border-color:rgba(0,174,236,0.4)!important; color:#00AEEC!important; }
-    .model-tab.active { background:rgba(0,174,236,0.2)!important; color:#00AEEC!important;
-                        border-color:rgba(0,174,236,0.5)!important; }
-  </style>
-</head>
-<body>
-
-<!-- 头部 -->
-<div class="header">
-  <div class="header-logo">字</div>
-  <div>
-    <div class="header-title">B站 AI 字幕</div>
-    <div class="header-sub">Qwen3-ASR + ForcedAligner</div>
-  </div>
-</div>
-
-<!-- WS 状态 -->
-<div class="ws-indicator" style="margin-top:12px; margin-left:16px; margin-right:16px;">
-  <div class="ws-dot connecting" id="ws-dot"></div>
-  <span class="ws-label" id="ws-label">检测 ASR 服务中...</span>
-</div>
-
-<!-- URL 输入 -->
-<div class="input-section">
-  <div class="input-row" style="margin-top:12px;">
-    <input type="text" id="url-input" placeholder="粘贴 B站视频链接或 BV 号">
-    <button id="btn-generate" disabled>生成字幕</button>
-  </div>
-  
-  <!-- 模型选择 -->
-  <div style="display:flex;align-items:center;gap:8px;margin-top:10px;">
-    <span style="font-size:12px;color:rgba(255,255,255,0.5);flex-shrink:0;">ASR 模型</span>
-    <div id="model-tabs" style="display:flex;gap:4px;flex:1;">
-      <button class="model-tab active" data-model="qwen3"
-        style="flex:1;padding:5px 0;border:1px solid rgba(255,255,255,0.15);border-radius:6px;
-               background:rgba(0,174,236,0.2);color:#00AEEC;font-size:11px;font-weight:600;cursor:pointer;">
-        Qwen3-ASR
-      </button>
-      <button class="model-tab" data-model="vibevoice"
-        style="flex:1;padding:5px 0;border:1px solid rgba(255,255,255,0.1);border-radius:6px;
-               background:transparent;color:rgba(255,255,255,0.45);font-size:11px;cursor:pointer;">
-        VibeVoice
-      </button>
+      input[type="range"] {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 100px;
+        height: 3px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.15);
+        outline: none;
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 13px;
+        height: 13px;
+        border-radius: 50%;
+        background: #00aeec;
+        cursor: pointer;
+      }
+      .setting-value {
+        font-size: 12px;
+        color: #00aeec;
+        min-width: 32px;
+        text-align: right;
+      }
+      .model-tab:hover {
+        border-color: rgba(0, 174, 236, 0.4) !important;
+        color: #00aeec !important;
+      }
+      .model-tab.active {
+        background: rgba(0, 174, 236, 0.2) !important;
+        color: #00aeec !important;
+        border-color: rgba(0, 174, 236, 0.5) !important;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 头部 -->
+    <div class="header">
+      <div class="header-logo">字</div>
+      <div>
+        <div class="header-title">B站 AI 字幕</div>
+        <div class="header-sub">Qwen3-ASR + ForcedAligner</div>
+      </div>
     </div>
-  </div>
-  <p id="model-hint" style="font-size:10px;color:rgba(255,255,255,0.3);margin-top:5px;text-align:center;">
-    Qwen3: 快速，需 Aligner｜VibeVoice: 9B，自带时间戳，首次需下载
-  </p>
-</div>
 
-<!-- 进度 -->
-<div class="progress-section" id="progress-section">
-  <div class="progress-bar-wrap">
-    <div class="progress-bar" id="progress-bar"></div>
-  </div>
-  <div class="progress-label">
-    <span id="progress-pct">0%</span>
-    <span id="progress-words">0 词</span>
-  </div>
-</div>
+    <!-- WS 状态 -->
+    <div
+      class="ws-indicator"
+      style="margin-top: 12px; margin-left: 16px; margin-right: 16px"
+    >
+      <div class="ws-dot connecting" id="ws-dot"></div>
+      <span class="ws-label" id="ws-label">检测 ASR 服务中...</span>
+    </div>
 
-<!-- 状态文字 -->
-<p class="status-text" id="status-text">请在 B站视频页面粘贴链接</p>
+    <!-- URL 输入 -->
+    <div class="input-section">
+      <div class="input-row" style="margin-top: 12px">
+        <input
+          type="text"
+          id="url-input"
+          placeholder="粘贴 B站视频链接或 BV 号"
+        />
+        <button id="btn-generate" disabled>生成字幕</button>
+      </div>
 
-<!-- 停止按钮 -->
-<button id="btn-stop">⏹ 停止字幕</button>
+      <!-- 模型选择 -->
+      <div
+        style="display: flex; align-items: center; gap: 8px; margin-top: 10px"
+      >
+        <span
+          style="
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.5);
+            flex-shrink: 0;
+          "
+          >ASR 模型</span
+        >
+        <div id="model-tabs" style="display: flex; gap: 4px; flex: 1">
+          <button
+            class="model-tab active"
+            data-model="qwen3"
+            style="
+              flex: 1;
+              padding: 5px 0;
+              border: 1px solid rgba(255, 255, 255, 0.15);
+              border-radius: 6px;
+              background: rgba(0, 174, 236, 0.2);
+              color: #00aeec;
+              font-size: 11px;
+              font-weight: 600;
+              cursor: pointer;
+            "
+          >
+            Qwen3-ASR
+          </button>
+          <button
+            class="model-tab"
+            data-model="vibevoice"
+            style="
+              flex: 1;
+              padding: 5px 0;
+              border: 1px solid rgba(255, 255, 255, 0.1);
+              border-radius: 6px;
+              background: transparent;
+              color: rgba(255, 255, 255, 0.45);
+              font-size: 11px;
+              cursor: pointer;
+            "
+          >
+            VibeVoice
+          </button>
+        </div>
+      </div>
+      <p
+        id="model-hint"
+        style="
+          font-size: 10px;
+          color: rgba(255, 255, 255, 0.3);
+          margin-top: 5px;
+          text-align: center;
+        "
+      >
+        Qwen3: 快速，需 Aligner｜VibeVoice: 9B，自带时间戳，首次需下载
+      </p>
+    </div>
 
-<!-- 设置 -->
-<div class="divider"></div>
-<div class="settings-section">
-  <div class="settings-title">显示设置</div>
+    <!-- 进度 -->
+    <div class="progress-section" id="progress-section">
+      <div class="progress-bar-wrap">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+      <div class="progress-label">
+        <span id="progress-pct">0%</span>
+        <span id="progress-words">0 词</span>
+      </div>
+    </div>
 
-  <div class="setting-row">
-    <span class="setting-label">字幕大小</span>
-    <input type="range" id="font-size" min="14" max="28" step="1" value="19">
-    <span class="setting-value" id="font-size-val">19px</span>
-  </div>
+    <!-- 状态文字 -->
+    <p class="status-text" id="status-text">请在 B站视频页面粘贴链接</p>
 
-  <div class="setting-row">
-    <span class="setting-label">背景透明度</span>
-    <input type="range" id="bg-opacity" min="0" max="90" step="5" value="72">
-    <span class="setting-value" id="bg-opacity-val">72%</span>
-  </div>
-</div>
+    <!-- 停止按钮 -->
+    <button id="btn-stop">⏹ 停止字幕</button>
 
-<script src="popup.js"></script>
-</body>
+    <!-- 设置 -->
+    <div class="divider"></div>
+    <div class="settings-section">
+      <div class="settings-title">显示设置</div>
+
+      <div class="setting-row">
+        <span class="setting-label">字幕大小</span>
+        <input
+          type="range"
+          id="font-size"
+          min="14"
+          max="28"
+          step="1"
+          value="19"
+        />
+        <span class="setting-value" id="font-size-val">19px</span>
+      </div>
+
+      <div class="setting-row">
+        <span class="setting-label">背景透明度</span>
+        <input
+          type="range"
+          id="bg-opacity"
+          min="0"
+          max="90"
+          step="5"
+          value="72"
+        />
+        <span class="setting-value" id="bg-opacity-val">72%</span>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
 </html>
