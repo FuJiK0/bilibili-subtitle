@@ -3,13 +3,7 @@
   "name": "B站实时字幕",
   "version": "2.0",
   "description": "为B站视频生成离线 AI 字幕（Qwen3-ASR + 强制对齐）",
-  "permissions": [
-    "offscreen",
-    "storage",
-    "tabs",
-    "scripting",
-    "activeTab"
-  ],
+  "permissions": ["offscreen", "storage", "tabs", "scripting", "activeTab"],
   "host_permissions": [
     "https://api.bilibili.com/*",
     "https://www.bilibili.com/*",

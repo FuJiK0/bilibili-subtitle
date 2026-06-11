@@ -1,6 +1,6 @@
 # B站实时字幕
 
-一个面向 Bilibili 视频页的 Chrome 扩展，用本地 MLX ASR 服务为视频生成实时字幕。扩展负责获取音频、解码、分块和页面展示；`server_mlx.py` 负责通过 WebSocket 接收音频 PCM，并调用本地或 Hugging Face 模型完成转写。
+一个面向 Bilibili 视频页的 Chrome 扩展，用本地 ASR 服务为视频生成实时字幕。扩展负责获取音频、解码、分块和页面展示；`server_mlx.py` 负责通过 WebSocket 接收音频 PCM，并调用本地或 Hugging Face 模型完成转写。
 
 ## 功能
 
@@ -13,16 +13,22 @@
 
 ## 环境要求
 
-- macOS Apple Silicon。
+- macOS Apple Silicon，或 Windows + NVIDIA CUDA。
 - Python 3.10+。
 - Chrome 或 Chromium 系浏览器。
 - 可访问 Bilibili，并在浏览器中登录需要登录权限的视频。
-- 已安装 MLX 音频相关依赖。
 
-依赖安装示例：
+macOS Apple Silicon 依赖示例：
 
 ```bash
 pip install numpy soundfile websockets mlx-audio
+```
+
+Windows CUDA 依赖示例：
+
+```powershell
+pip install numpy soundfile websockets accelerate transformers qwen-asr
+pip install torch --index-url https://download.pytorch.org/whl/cu121
 ```
 
 如果你的环境使用 `uv`、`conda` 或虚拟环境，也可以在对应环境里安装这些依赖。
@@ -35,6 +41,11 @@ pip install numpy soundfile websockets mlx-audio
 python server_mlx.py
 ```
 
+默认后端选择规则：
+
+- macOS：`mlx`
+- Windows/Linux：`torch`
+
 服务默认监听：
 
 ```text
@@ -45,16 +56,27 @@ ws://localhost:8765
 
 ## 配置模型路径
 
-`server_mlx.py` 支持 Hugging Face 模型 ID，也支持本地模型目录。推荐用命令行参数配置：
+`server_mlx.py` 支持 Hugging Face 模型 ID，也支持本地模型目录。推荐用命令行参数配置。
+
+macOS / MLX：
 
 ```bash
-python server_mlx.py \
+python server_mlx.py --backend mlx \
   --qwen3-asr /path/to/Qwen3-ASR-1.7B-8bit \
   --qwen3-aligner /path/to/Qwen3-ForcedAligner-0.6B-8bit \
   --vibevoice mlx-community/VibeVoice-ASR-bf16
 ```
 
-也可以用环境变量：
+Windows / CUDA：
+
+```powershell
+python server_mlx.py --backend torch `
+  --qwen3-asr Qwen/Qwen3-ASR-1.7B `
+  --qwen3-aligner Qwen/Qwen3-ForcedAligner-0.6B `
+  --vibevoice microsoft/VibeVoice-ASR-HF
+```
+
+macOS/Linux 环境变量示例：
 
 ```bash
 export BILISUB_QWEN3_ASR=/path/to/Qwen3-ASR-1.7B-8bit
@@ -63,16 +85,30 @@ export BILISUB_VIBEVOICE=mlx-community/VibeVoice-ASR-bf16
 python server_mlx.py
 ```
 
+Windows PowerShell 环境变量示例：
+
+```powershell
+$env:BILISUB_BACKEND = "torch"
+$env:BILISUB_QWEN3_ASR = "Qwen/Qwen3-ASR-1.7B"
+$env:BILISUB_QWEN3_ALIGNER = "Qwen/Qwen3-ForcedAligner-0.6B"
+$env:BILISUB_VIBEVOICE = "microsoft/VibeVoice-ASR-HF"
+python server_mlx.py
+```
+
 可配置项：
 
 | 参数 | 环境变量 | 默认值 |
 | --- | --- | --- |
+| `--backend` | `BILISUB_BACKEND` | `auto` |
 | `--host` | `BILISUB_HOST` | `localhost` |
 | `--port` | `BILISUB_PORT` | `8765` |
 | `--language` | `BILISUB_LANGUAGE` | `Chinese` |
-| `--qwen3-asr` | `BILISUB_QWEN3_ASR` | `mlx-community/Qwen3-ASR-1.7B-8bit` |
-| `--qwen3-aligner` | `BILISUB_QWEN3_ALIGNER` | `mlx-community/Qwen3-ForcedAligner-0.6B-8bit` |
-| `--vibevoice` | `BILISUB_VIBEVOICE` | `mlx-community/VibeVoice-ASR-bf16` |
+| `--torch-device` | `BILISUB_TORCH_DEVICE` | `auto` |
+| `--qwen3-asr` | `BILISUB_QWEN3_ASR` | macOS: `mlx-community/Qwen3-ASR-1.7B-8bit`；Windows: `Qwen/Qwen3-ASR-1.7B` |
+| `--qwen3-aligner` | `BILISUB_QWEN3_ALIGNER` | macOS: `mlx-community/Qwen3-ForcedAligner-0.6B-8bit`；Windows: `Qwen/Qwen3-ForcedAligner-0.6B` |
+| `--vibevoice` | `BILISUB_VIBEVOICE` | macOS: `mlx-community/VibeVoice-ASR-bf16`；Windows: `microsoft/VibeVoice-ASR-HF` |
+
+Hugging Face 模型默认缓存位置由 `huggingface_hub` 决定。Windows 常见路径为 `C:\Users\<用户名>\.cache\huggingface`，也可以设置 `HF_HOME` 调整缓存目录。
 
 ## 加载 Chrome 扩展
 
@@ -121,6 +157,8 @@ Bilibili 音频 CDN URL 带临时鉴权，可能过期或被某个 CDN 节点拒
 
 检查模型路径是否存在，或 Hugging Face 模型 ID 是否可访问。本地路径建议使用绝对路径。
 
+Windows 原生环境不能使用 `--backend mlx`。如果使用 Torch 后端但没有检测到 CUDA，服务仍会尝试用 CPU 启动，但长视频转写会非常慢。
+
 ### VibeVoice 首次使用很慢
 
 VibeVoice 模型较大，首次使用可能需要下载或加载较长时间。Qwen3 模型会在服务启动时加载，VibeVoice 会在切换到该模型时懒加载。
@@ -134,8 +172,7 @@ content.css     字幕覆盖层基础样式
 offscreen.js    下载/解码音频，分块后发送给 WebSocket 服务
 popup.html      扩展弹窗界面
 popup.js        扩展弹窗逻辑
-server_mlx.py   本地 MLX ASR WebSocket 服务
+server_mlx.py   本地 ASR WebSocket 服务
 manifest.json   Chrome 扩展清单
 assets/         扩展图标资源
 ```
-
